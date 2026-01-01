@@ -92,6 +92,7 @@
     <ClInclude Include="core_types.h" />
     <ClInclude Include="cu_allocator.h" />
     <ClInclude Include="cu_errors.h" />
+    <ClInclude Include="cu_math.h" />
     <ClInclude Include="warps.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

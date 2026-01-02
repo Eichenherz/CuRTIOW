@@ -12,6 +12,7 @@
 #include "cu_errors.h"
 #include "cu_allocator.h"
 #include "cu_math.h"
+#include "cu_rand.h"
 
 #include "ray_tracing.h"
 
@@ -117,25 +118,24 @@ struct world
 
 struct globals
 {
-    camera  mainCam;
+    camera               mainCam;
     alignas( 8 ) u32     width;
     alignas( 8 ) u32     height;
+    alignas( 8 ) u32     samplesPerPixel;
+    alignas( 8 ) u32     maxBounces;
 };
 
 // NOTE: these must be properly alligned
 __constant__ globals globs;
 
-__device__ float3 Shade( const ray& r, const hit_record& hit )
+__device__ float3 Shade( const ray& r, float attenuation )
 {
-    if( IsValidHit( hit ) )
-    {
-        return 0.5f * hit.normal + float3{ 0.5f, 0.5f, 0.5f };
-    }
     float t = 0.5f * r.dir.y + 0.5f;
-    return lerp( float3{ 1.0f, 1.0f, 1.0f }, float3{ 0.5f, 0.7f, 1.0f }, t );
+    float3 col = lerp( float3{ 1.0f, 1.0f, 1.0f }, float3{ 0.5f, 0.7f, 1.0f }, t );
+    return col * attenuation;
 };
 
-__global__ void RenderKernel( cudaSurfaceObject_t fbSurf, const world w ) 
+__global__ void RenderKernel( cudaSurfaceObject_t fbSurf, const world w, u32 frameIdx ) 
 {
     u32 xi = threadIdx.x + blockIdx.x * blockDim.x;
     u32 yi = threadIdx.y + blockIdx.y * blockDim.y;
@@ -144,33 +144,64 @@ __global__ void RenderKernel( cudaSurfaceObject_t fbSurf, const world w )
 
     const camera mainCam = globs.mainCam;
 
-    float4 clipSpacePos = GetClipSpaceVector( { xi, yi }, { globs.width, globs.height } );
-    float4 worldHmgPos = mul( mainCam.invVP, clipSpacePos );
+    u32 pixelIdx = yi * globs.width + xi;
+    u32 seed = pixelIdx ^ ( frameIdx * PRIME1 );
 
-    float3 rayDir = normalize( xyz( worldHmgPos ) - mainCam.pos );
-
-    ray r = { .origin = mainCam.pos, .dir = rayDir };
-
-    hit_record rec = INVALID_HIT;
-    float closestSoFar = CUDART_INF_F;
-
-    for( u32 hi = 0; hi < w.count; ++hi )
+    float3 accColor = {};
+    for( u32 si = 0; si < globs.samplesPerPixel; ++si )
     {
-        sphere_t hittable = w.hittables[ hi ];
-        hit_record hit = HitRayVsSphere( r, hittable, 0.0f, closestSoFar );
-        if( NO_HIT != hit.t )
+        float2 jitter = RandVec2( si, seed ) - float2{ 0.5f, 0.5f };
+        float4 clipSpacePos = GetClipSpaceVector( float2( xi, yi ) + jitter, float2( globs.width, globs.height ) );
+        float4 worldHmgPos = mul( mainCam.invVP, clipSpacePos );
+
+        float3 rayDir = normalize( xyz( worldHmgPos ) - mainCam.pos );
+
+        ray currentRay = { .origin = mainCam.pos, .dir = rayDir };
+        float currentAttenuation = 1.0f;
+        constexpr float reflectionFactor = 0.3f;
+
+        u32 bi = 0;
+        for( ; bi < globs.maxBounces; ++bi )
         {
-            closestSoFar = hit.t;
-            rec = hit;
+            hit_record rec = INVALID_HIT;
+            float closestSoFar = CUDART_INF_F;
+            for( u32 hi = 0; hi < w.count; ++hi )
+            {
+                sphere_t hittable = w.hittables[ hi ];
+                hit_record hit = HitRayVsSphere( currentRay, hittable, RAY_EPSILON, closestSoFar );
+                if( NO_HIT != hit.t )
+                {
+                    closestSoFar = hit.t;
+                    rec = hit;
+                }
+            }
+
+            if( IsValidHit( rec ) )
+            {
+                u32 diffSeed = si ^ ( seed * PRIME2 );
+                float3 unitRand = normalize( RandVec3( bi, diffSeed ) );
+                float3 lamberitanReflectionDistr = rec.normal + unitRand;
+
+                currentRay = { .origin = rec.point, .dir = normalize( lamberitanReflectionDistr ) };
+                currentAttenuation *= reflectionFactor;
+            }
+            else
+            {
+                accColor += Shade( currentRay, currentAttenuation );
+                break;
+            }
+        }   
+        if( bi >= globs.maxBounces )
+        {
+            accColor = {};
         }
     }
 
-    float3 rayCol = Shade( r, rec );
+    float3 linearCol = accColor / ( float ) globs.samplesPerPixel;
+    float3 srgbCol = LinearToSrgb( linearCol );
     // NOTE: to avoid artifacts
-    rayCol = saturatef3( rayCol ) * 255.99f;
-
-    u8x4 pixel = { ( u8 ) rayCol.x, ( u8 ) rayCol.y, ( u8 ) rayCol.z, 255 };
-    
+    float3 pixelCol = saturatef3( srgbCol ) * 255.99f;
+    u8x4 pixel = { ( u8 ) pixelCol.x, ( u8 ) pixelCol.y, ( u8 ) pixelCol.z, 255 };
     // NOTE: cuda 12.9 with err with interleaved source in ptx for this line ! on Pascal
     surf2Dwrite( pixel, fbSurf, xi * sizeof( pixel ), yi );
 }
@@ -203,7 +234,9 @@ int main()
     globals g = {
         .mainCam = MakeCamRH( width, height ),
         .width = width,
-        .height = height
+        .height = height,
+        .samplesPerPixel = 50,
+        .maxBounces = 5
     };
 
     CUDA_CHECK( cudaMemcpyToSymbol( globs, &g, sizeof( g ) ) );
@@ -216,11 +249,13 @@ int main()
 
     world w = { .hittables = thrust::raw_pointer_cast( std::data( dSpheres ) ), .count = ( u32 ) std::size( dSpheres ) };
 
+    u32 frameIdx = 0;
+
     u32 tx = 8;
     u32 ty = 8;
     
     dim3 blocks( ( width + tx - 1 ) / tx, ( height + ty - 1 ) / ty );
-    RenderKernel<<<blocks, dim3( tx, ty )>>>( pGradTex->surf, w );
+    RenderKernel<<<blocks, dim3( tx, ty )>>>( pGradTex->surf, w, frameIdx );
     CUDA_CHECK( cudaGetLastError() );
     CUDA_CHECK( cudaDeviceSynchronize() );
 

@@ -1673,6 +1673,11 @@ inline __host__ __device__ float4 powf4( float4 base, float4 exp )
     return { powf( base.x, exp.x ), powf( base.y, exp.y ), powf( base.z, exp.z ), powf( base.w, exp.w ) };
 }
 
+inline __host__ __device__ float3 sqrtf3( float3 num )
+{
+    return { sqrtf( num.x ), sqrtf( num.y ), sqrtf( num.z ) };
+}
+
 inline __host__ __device__ float3 lerp( float3 a, float3 b, float3 t )
 {
     return a + t * ( b - a );
@@ -1702,10 +1707,10 @@ inline __host__ __device__ float4 operator<=( float4 a, float4 b )
     };
 }
 
-inline __host__ __device__ float4 GetClipSpaceVector( uint2 uvScreen, uint2 screenRes )
+inline __host__ __device__ float4 GetClipSpaceVector( float2 uvScreen, float2 screenRes )
 {
-    float2 invScreenRes = 2.0f / ToFloat2( screenRes );
-    float2 ndc = ToFloat2( uvScreen + 0.5f ) * invScreenRes - float2{ 1.0f, 1.0f };
+    float2 invScreenRes = 2.0f / screenRes;
+    float2 ndc = ( uvScreen + 0.5f ) * invScreenRes - float2{ 1.0f, 1.0f };
 
     return { ndc.x, -ndc.y, 1.0f, 1.0f };
 }
@@ -1714,11 +1719,11 @@ inline __host__ __device__ float4 GetClipSpaceVector( uint2 uvScreen, uint2 scre
 // NOTE: taken from https://gamedev.stackexchange.com/questions/92015/optimized-linear-to-srgb-glsl
 __host__ __device__ float3 LinearToSrgb( float3 rgb )
 {
-    constexpr auto _1055f = float3{ 1.055f, 1.055f, 1.055f };
-    constexpr auto inv24f = float3{ 1.0f / 2.4f, 1.0f / 2.4f, 1.0f / 2.4f };
-    constexpr auto _0055f = float3{ 0.055f, 0.055f, 0.055f };
-    constexpr auto _1292f = float3{ 12.92f, 12.92f, 12.92f };
-    constexpr auto threshold = float3{ 0.0031308f, 0.0031308f, 0.0031308f };
+    constexpr float3 _1055f = { 1.055f, 1.055f, 1.055f };
+    constexpr float3 inv24f = { 1.0f / 2.4f, 1.0f / 2.4f, 1.0f / 2.4f };
+    constexpr float3 _0055f = { 0.055f, 0.055f, 0.055f };
+    constexpr float3 _1292f = { 12.92f, 12.92f, 12.92f };
+    constexpr float3 threshold = { 0.0031308f, 0.0031308f, 0.0031308f };
 
     float3 cutoff = rgb <= threshold;
    
@@ -1730,11 +1735,11 @@ __host__ __device__ float3 LinearToSrgb( float3 rgb )
 
 inline __host__ __device__ float4 LinearToSrgb( float4 rgb )
 {
-    constexpr auto _1055f = float4{ 1.055f, 1.055f, 1.055f, 1.055f };
-    constexpr auto inv24f = float4{ 1.0f / 2.4f, 1.0f / 2.4f, 1.0f / 2.4f, 1.0f / 2.4f };
-    constexpr auto _0055f = float4{ 0.055f, 0.055f, 0.055f, 0.055f };
-    constexpr auto _1292f = float4{ 12.92f, 12.92f, 12.92f, 12.92f };
-    constexpr auto threshold = float4{ 0.0031308f, 0.0031308f, 0.0031308f, 0.0031308f };
+    constexpr float4 _1055f = { 1.055f, 1.055f, 1.055f, 1.055f };
+    constexpr float4 inv24f = { 1.0f / 2.4f, 1.0f / 2.4f, 1.0f / 2.4f, 1.0f / 2.4f };
+    constexpr float4 _0055f = { 0.055f, 0.055f, 0.055f, 0.055f };
+    constexpr float4 _1292f = { 12.92f, 12.92f, 12.92f, 12.92f };
+    constexpr float4 threshold = { 0.0031308f, 0.0031308f, 0.0031308f, 0.0031308f };
 
     float4 cutoff = rgb <= threshold;
 

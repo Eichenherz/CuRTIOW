@@ -7,6 +7,8 @@
 #include "core_types.h"
 #include "cu_math.h"
 
+constexpr float RAY_EPSILON = 0.001f;
+
 // NOTE: the vecs are initialized to RH ( look at you RH palm )
 struct camera
 {

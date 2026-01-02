@@ -3,6 +3,8 @@
 
 #include <memory>
 
+#include <thrust/device_vector.h>
+
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
 
@@ -11,61 +13,11 @@
 #include "cu_allocator.h"
 #include "cu_math.h"
 
+#include "ray_tracing.h"
+
 constexpr u16 width = 1280;
 constexpr u16 height = 720;
 
-struct ray
-{
-    alignas( 16 ) float3 origin;
-    alignas( 16 ) float3 dir;
-
-    __device__ float3 At( float t ) const
-    {
-        return origin + t * dir;
-    }
-};
-
-// NOTE: the vecs are initialized to RH ( look at you RH palm )
-struct camera
-{
-    float4x4 view;
-    float4x4 proj;
-    float4x4 invVP;
-
-    float3 pos;
-    float fovYRad;
-
-    float3 fwd;
-    float aspect;
-
-    float3 up;
-    float zNear;
-};
-
-inline camera MakeCamRH( u32 width, u32 height, float fovYRad = 1.570f, float zNear = 0.1f )
-{
-    camera cam = {
-        .pos = {},
-        .fovYRad = fovYRad,
-        .fwd = { 0.0f, 0.0f, -1.0f },
-        .aspect = ( float ) width / ( float ) height,
-        .up = { 0.0f, 1.0f, 0.0f },
-        .zNear = zNear
-    };
-
-    float3 lookAt = cam.pos + cam.fwd;
-    cam.view = LookAtRH( cam.pos, lookAt, cam.up );
-    cam.proj = PerspectiveInfFarRH( fovYRad, cam.aspect, zNear );
-
-    float4x4 vp = mul( cam.proj, cam.view );
-
-    float vpDet = det( vp );
-    assert( 0.0f != vpDet );
-
-    cam.invVP = ( 1.0f / vpDet ) * adj( vp );
-
-    return cam;
-}
 
 enum cuda_texture_usage_flags : u64
 {
@@ -157,35 +109,67 @@ inline auto CudaCopyImageToHostSync( const cuda_tex2d& tex2d )
     return out;
 }
 
-
-__constant__ camera mainCam;
-
-
-__device__ float3 GetRayCol( const ray& r ) 
+struct world
 {
+    const sphere_t* hittables;
+    u32 count;
+};
+
+struct globals
+{
+    camera  mainCam;
+    alignas( 8 ) u32     width;
+    alignas( 8 ) u32     height;
+};
+
+// NOTE: these must be properly alligned
+__constant__ globals globs;
+
+__device__ float3 Shade( const ray& r, const hit_record& hit )
+{
+    if( IsValidHit( hit ) )
+    {
+        return 0.5f * hit.normal + float3{ 0.5f, 0.5f, 0.5f };
+    }
     float t = 0.5f * r.dir.y + 0.5f;
     return lerp( float3{ 1.0f, 1.0f, 1.0f }, float3{ 0.5f, 0.7f, 1.0f }, t );
 };
 
-__global__ void RenderKernel( cudaSurfaceObject_t fbSurf, u32 width, u32 height ) 
+__global__ void RenderKernel( cudaSurfaceObject_t fbSurf, const world w ) 
 {
     u32 xi = threadIdx.x + blockIdx.x * blockDim.x;
     u32 yi = threadIdx.y + blockIdx.y * blockDim.y;
 
-    if( ( xi >= width ) || ( yi >= height ) ) return;
+    if( ( xi >= globs.width ) || ( yi >= globs.height ) ) return;
 
-    float4 clipSpacePos = GetClipSpaceVector( { xi, yi }, { width, height } );
+    const camera mainCam = globs.mainCam;
+
+    float4 clipSpacePos = GetClipSpaceVector( { xi, yi }, { globs.width, globs.height } );
     float4 worldHmgPos = mul( mainCam.invVP, clipSpacePos );
 
-    float3 rayDir = normalize( float3{ worldHmgPos.x, worldHmgPos.y, worldHmgPos.z } - mainCam.pos );
+    float3 rayDir = normalize( xyz( worldHmgPos ) - mainCam.pos );
 
     ray r = { .origin = mainCam.pos, .dir = rayDir };
 
-    float3 rayCol = GetRayCol( r );
+    hit_record rec = INVALID_HIT;
+    float closestSoFar = CUDART_INF_F;
+
+    for( u32 hi = 0; hi < w.count; ++hi )
+    {
+        sphere_t hittable = w.hittables[ hi ];
+        hit_record hit = HitRayVsSphere( r, hittable, 0.0f, closestSoFar );
+        if( NO_HIT != hit.t )
+        {
+            closestSoFar = hit.t;
+            rec = hit;
+        }
+    }
+
+    float3 rayCol = Shade( r, rec );
     // NOTE: to avoid artifacts
     rayCol = saturatef3( rayCol ) * 255.99f;
 
-    auto pixel = make_uchar4( ( u8 ) rayCol.x, ( u8 ) rayCol.y, ( u8 ) rayCol.z, 255 );
+    u8x4 pixel = { ( u8 ) rayCol.x, ( u8 ) rayCol.y, ( u8 ) rayCol.z, 255 };
     
     // NOTE: cuda 12.9 with err with interleaved source in ptx for this line ! on Pascal
     surf2Dwrite( pixel, fbSurf, xi * sizeof( pixel ), yi );
@@ -216,16 +200,27 @@ int main()
     constexpr u64 usageFlags = cuda_texture_usage_flags::READONLY | cuda_texture_usage_flags::WRITE;
     auto pGradTex = MakeSharedCudaTex2D<pixel_t>( width, height, usageFlags );
 
-    camera cam = MakeCamRH( width, height );
+    globals g = {
+        .mainCam = MakeCamRH( width, height ),
+        .width = width,
+        .height = height
+    };
 
-    CUDA_CHECK( cudaMemcpyToSymbol( mainCam, &cam, sizeof( cam ), 0, cudaMemcpyHostToDevice ) );
+    CUDA_CHECK( cudaMemcpyToSymbol( globs, &g, sizeof( g ) ) );
 
+    std::vector<sphere_t> spheres;
+    spheres.push_back( { .center = { 0.0f, 0.0f, -1.0f }, .radius = 0.5f } );
+    spheres.push_back( { .center = { 0.0f, -100.5f, -1.0f }, .radius = 100.0f } );
+
+    thrust::device_vector<sphere_t> dSpheres = { std::cbegin( spheres ), std::cend( spheres ) };
+
+    world w = { .hittables = thrust::raw_pointer_cast( std::data( dSpheres ) ), .count = ( u32 ) std::size( dSpheres ) };
 
     u32 tx = 8;
     u32 ty = 8;
     
     dim3 blocks( ( width + tx - 1 ) / tx, ( height + ty - 1 ) / ty );
-    RenderKernel<<<blocks, dim3( tx, ty )>>>( pGradTex->surf, width, height );
+    RenderKernel<<<blocks, dim3( tx, ty )>>>( pGradTex->surf, w );
     CUDA_CHECK( cudaGetLastError() );
     CUDA_CHECK( cudaDeviceSynchronize() );
 

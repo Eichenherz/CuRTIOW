@@ -1313,6 +1313,19 @@ inline __host__ __device__ float length(float4 v)
     return sqrtf(dot(v, v));
 }
 
+inline __host__ __device__ float length_sq(float2 v)
+{
+    return dot(v, v);
+}
+inline __host__ __device__ float length_sq(float3 v)
+{
+    return dot(v, v);
+}
+inline __host__ __device__ float length_sq(float4 v)
+{
+    return dot(v, v);
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // normalize
 ////////////////////////////////////////////////////////////////////////////////
@@ -1469,7 +1482,20 @@ inline __device__ __host__ float4 smoothstep(float4 a, float4 b, float4 x)
 // NOTE: NV code ends here
 // ============================================================================
 
+////////////////////////////////////////////////////////////////////////////////
+// swizzle
+////////////////////////////////////////////////////////////////////////////////
+#define SWIZZLE3( a, b, c ) \
+    inline __host__ __device__ auto a##b##c( float3 in ) { return make_float3( in.a, in.b, in.c ); }
+
+#define SWIZZLE4_3( a, b, c ) \
+    inline __host__ __device__ auto a##b##c( float4 in ) { return make_float3( in.a, in.b, in.c ); }
+
+SWIZZLE3( x, y, z )
+SWIZZLE4_3( x, y, z )
+
 #include <array>
+#include <math_constants.h>
 
 // NOTE: row maj
 using float4x4 = std::array<float4, 4>;
@@ -1702,7 +1728,7 @@ __host__ __device__ float3 LinearToSrgb( float3 rgb )
     return lerp( higher, lower, cutoff );
 }
 
-__host__ __device__ float4 LinearToSrgb( float4 rgb )
+inline __host__ __device__ float4 LinearToSrgb( float4 rgb )
 {
     constexpr auto _1055f = float4{ 1.055f, 1.055f, 1.055f, 1.055f };
     constexpr auto inv24f = float4{ 1.0f / 2.4f, 1.0f / 2.4f, 1.0f / 2.4f, 1.0f / 2.4f };

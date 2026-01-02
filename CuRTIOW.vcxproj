@@ -93,6 +93,8 @@
     <ClInclude Include="cu_allocator.h" />
     <ClInclude Include="cu_errors.h" />
     <ClInclude Include="cu_math.h" />
+    <ClInclude Include="cu_rand.h" />
+    <ClInclude Include="cu_tex2d.h" />
     <ClInclude Include="ray_tracing.h" />
     <ClInclude Include="warps.h" />
   </ItemGroup>

@@ -1574,6 +1574,7 @@ inline __host__ __device__ float det( const float4x4& m )
 
 inline __host__ __device__ float4x4 adj( const float4x4& m )
 {
+    // Inputs (Row-Major)
     float n11 = m[ 0 ].x, n12 = m[ 0 ].y, n13 = m[ 0 ].z, n14 = m[ 0 ].w;
     float n21 = m[ 1 ].x, n22 = m[ 1 ].y, n23 = m[ 1 ].z, n24 = m[ 1 ].w;
     float n31 = m[ 2 ].x, n32 = m[ 2 ].y, n33 = m[ 2 ].z, n34 = m[ 2 ].w;
@@ -1581,34 +1582,40 @@ inline __host__ __device__ float4x4 adj( const float4x4& m )
 
     float4x4 res;
 
-    // Row 0
-    res[ 0 ].x = n22 * ( n33 * n44 - n34 * n43 ) - n23 * ( n32 * n44 - n34 * n42 ) + n24 * ( n32 * n43 - n33 * n42 );
+    // Row 0 of res = Cofactors of Col 0 of m
+    res[ 0 ].x =  ( n22 * ( n33 * n44 - n34 * n43 ) - n23 * ( n32 * n44 - n34 * n42 ) + n24 * ( n32 * n43 - n33 * n42 ) );
     res[ 0 ].y = -( n12 * ( n33 * n44 - n34 * n43 ) - n13 * ( n32 * n44 - n34 * n42 ) + n14 * ( n32 * n43 - n33 * n42 ) );
-    res[ 0 ].z = n12 * ( n23 * n44 - n24 * n43 ) - n13 * ( n22 * n44 - n24 * n42 ) + n14 * ( n22 * n43 - n23 * n42 );
+    res[ 0 ].z =  ( n12 * ( n23 * n44 - n24 * n43 ) - n13 * ( n22 * n44 - n24 * n42 ) + n14 * ( n22 * n43 - n23 * n42 ) );
     res[ 0 ].w = -( n12 * ( n23 * n34 - n24 * n33 ) - n13 * ( n22 * n34 - n24 * n32 ) + n14 * ( n22 * n33 - n23 * n32 ) );
 
-    // Row 1
+    // Row 1 of res = Cofactors of Col 1 of m
     res[ 1 ].x = -( n21 * ( n33 * n44 - n34 * n43 ) - n23 * ( n31 * n44 - n34 * n41 ) + n24 * ( n31 * n43 - n33 * n41 ) );
-    res[ 1 ].y = n11 * ( n33 * n44 - n34 * n43 ) - n13 * ( n31 * n44 - n34 * n41 ) + n14 * ( n31 * n43 - n33 * n41 );
-    res[ 1 ].z = -( n11 * ( n23 * n44 - n24 * n43 ) - n13 * ( n21 * n44 - n24 * n41 ) + n14 * ( n21 * n43 - n23 * n41 ) );
-    res[ 1 ].w = n11 * ( n23 * n34 - n24 * n33 ) - n13 * ( n21 * n34 - n24 * n31 ) + n14 * ( n21 * n33 - n23 * n31 );
+    res[ 1 ].y =  ( n11 * ( n33 * n44 - n34 * n43 ) - n13 * ( n31 * n44 - n34 * n41 ) + n14 * ( n31 * n43 - n33 * n41 ) );
+    res[ 1 ].z = -( n11 * ( n23 * n44 - n24 * n43 ) - n13 * ( n21 * n44 - n24 * n42 ) + n14 * ( n21 * n43 - n23 * n41 ) );
+    res[ 1 ].w =  ( n11 * ( n23 * n34 - n24 * n33 ) - n13 * ( n21 * n34 - n24 * n31 ) + n14 * ( n21 * n33 - n23 * n31 ) );
 
-    // Row 2
-    res[ 2 ].x = n21 * ( n32 * n44 - n34 * n42 ) - n22 * ( n31 * n44 - n34 * n41 ) + n24 * ( n31 * n42 - n32 * n41 );
+    // Row 2 of res = Cofactors of Col 2 of m
+    res[ 2 ].x =  ( n21 * ( n32 * n44 - n34 * n42 ) - n22 * ( n31 * n44 - n34 * n41 ) + n24 * ( n31 * n42 - n32 * n41 ) );
     res[ 2 ].y = -( n11 * ( n32 * n44 - n34 * n42 ) - n12 * ( n31 * n44 - n34 * n41 ) + n14 * ( n31 * n42 - n32 * n41 ) );
-    res[ 2 ].z = n11 * ( n22 * n44 - n24 * n42 ) - n12 * ( n21 * n44 - n24 * n41 ) + n14 * ( n21 * n42 - n22 * n41 );
+    res[ 2 ].z =  ( n11 * ( n22 * n44 - n24 * n42 ) - n12 * ( n21 * n44 - n24 * n41 ) + n14 * ( n21 * n42 - n22 * n41 ) );
     res[ 2 ].w = -( n11 * ( n22 * n34 - n24 * n32 ) - n12 * ( n21 * n34 - n24 * n31 ) + n14 * ( n21 * n32 - n22 * n31 ) );
 
-    // Row 3
+    // Row 3 of res = Cofactors of Col 3 of m
     res[ 3 ].x = -( n21 * ( n32 * n43 - n33 * n42 ) - n22 * ( n31 * n43 - n33 * n41 ) + n23 * ( n31 * n42 - n32 * n41 ) );
-    res[ 3 ].y = n11 * ( n32 * n43 - n33 * n42 ) - n12 * ( n31 * n43 - n33 * n41 ) + n13 * ( n31 * n42 - n32 * n41 );
+    res[ 3 ].y =  ( n11 * ( n32 * n43 - n33 * n42 ) - n12 * ( n31 * n43 - n33 * n41 ) + n13 * ( n31 * n42 - n32 * n41 ) );
     res[ 3 ].z = -( n11 * ( n22 * n43 - n23 * n42 ) - n12 * ( n21 * n43 - n23 * n41 ) + n13 * ( n21 * n42 - n22 * n41 ) );
-    res[ 3 ].w = n11 * ( n22 * n33 - n23 * n32 ) - n12 * ( n21 * n33 - n23 * n31 ) + n13 * ( n21 * n32 - n22 * n31 );
+    res[ 3 ].w =  ( n11 * ( n22 * n33 - n23 * n32 ) - n12 * ( n21 * n33 - n23 * n31 ) + n13 * ( n21 * n32 - n22 * n31 ) );
 
     return res;
 }
 
-// NOTE: inv = 1/det * adj
+inline __host__ float4x4 inv( const float4x4& m )
+{
+    float vpDet = det( m );
+    assert( 0.0f != vpDet );
+    return ( 1.0f / vpDet ) * adj( m );
+}
+
 
 inline __host__ __device__ float4x4 LookAtRH( float3 pos, float3 lookAt, float3 up )
 {
@@ -1635,19 +1642,17 @@ inline __host__ __device__ float4x4 PerspectiveInfFarRH( float fovYRads, float a
 {
     float f = 1.0f / tanf( fovYRads / 2.0f );
 
-    float4x4 res = {}; 
+    float4x4 res = {};
     // Row 0: X scaling
-    res[0] = make_float4(f / aspect, 0.0f, 0.0f,  0.0f);
+    res[ 0 ] = { f / aspect, 0.0f, 0.0f, 0.0f };
     // Row 1: Y scaling
-    res[1] = make_float4(0.0f, f, 0.0f, 0.0f);
+    res[ 1 ] = { 0.0f, f, 0.0f, 0.0f };
     // Row 2: Z mapping (Near -> 0, Far -> Infinity)
     // We want ClipZ = -1 * Z_view - zNear
-    res[2] = make_float4(0.0f, 0.0f, -1.0f, -zNear);
+    res[ 2 ] = { 0.0f, 0.0f, -1.0f, -zNear };
     // Row 3: Perspective Divide
     // We want ClipW = -1 * Z_view
-    res[3] = make_float4(0.0f, 0.0f, -1.0f, 0.0f);
-
-    return res;
+    res[ 3 ] = { 0.0f, 0.0f, -1.0f, 0.0f };
 
     return res;
 }
@@ -1671,6 +1676,11 @@ inline __host__ __device__ float3 powf3( float3 base, float3 exp )
 inline __host__ __device__ float4 powf4( float4 base, float4 exp )
 {
     return { powf( base.x, exp.x ), powf( base.y, exp.y ), powf( base.z, exp.z ), powf( base.w, exp.w ) };
+}
+
+inline __host__ __device__ float3 sqrtf3( float3 num )
+{
+    return { sqrtf( num.x ), sqrtf( num.y ), sqrtf( num.z ) };
 }
 
 inline __host__ __device__ float3 lerp( float3 a, float3 b, float3 t )
@@ -1702,23 +1712,23 @@ inline __host__ __device__ float4 operator<=( float4 a, float4 b )
     };
 }
 
-inline __host__ __device__ float4 GetClipSpaceVector( uint2 uvScreen, uint2 screenRes )
+inline __host__ __device__ float4 GetClipSpaceVector( float2 uvScreen, float2 screenRes )
 {
-    float2 invScreenRes = 2.0f / ToFloat2( screenRes );
-    float2 ndc = ToFloat2( uvScreen + 0.5f ) * invScreenRes - float2{ 1.0f, 1.0f };
+    float2 invScreenRes = 2.0f / screenRes;
+    float2 ndc = uvScreen * invScreenRes - float2{ 1.0f, 1.0f };
 
-    return { ndc.x, -ndc.y, 1.0f, 1.0f };
+    return { ndc.x, -ndc.y, 0.0f, 1.0f }; // NOTE: bc of ZNear
 }
 
 
 // NOTE: taken from https://gamedev.stackexchange.com/questions/92015/optimized-linear-to-srgb-glsl
 __host__ __device__ float3 LinearToSrgb( float3 rgb )
 {
-    constexpr auto _1055f = float3{ 1.055f, 1.055f, 1.055f };
-    constexpr auto inv24f = float3{ 1.0f / 2.4f, 1.0f / 2.4f, 1.0f / 2.4f };
-    constexpr auto _0055f = float3{ 0.055f, 0.055f, 0.055f };
-    constexpr auto _1292f = float3{ 12.92f, 12.92f, 12.92f };
-    constexpr auto threshold = float3{ 0.0031308f, 0.0031308f, 0.0031308f };
+    constexpr float3 _1055f = { 1.055f, 1.055f, 1.055f };
+    constexpr float3 inv24f = { 1.0f / 2.4f, 1.0f / 2.4f, 1.0f / 2.4f };
+    constexpr float3 _0055f = { 0.055f, 0.055f, 0.055f };
+    constexpr float3 _1292f = { 12.92f, 12.92f, 12.92f };
+    constexpr float3 threshold = { 0.0031308f, 0.0031308f, 0.0031308f };
 
     float3 cutoff = rgb <= threshold;
    
@@ -1730,11 +1740,11 @@ __host__ __device__ float3 LinearToSrgb( float3 rgb )
 
 inline __host__ __device__ float4 LinearToSrgb( float4 rgb )
 {
-    constexpr auto _1055f = float4{ 1.055f, 1.055f, 1.055f, 1.055f };
-    constexpr auto inv24f = float4{ 1.0f / 2.4f, 1.0f / 2.4f, 1.0f / 2.4f, 1.0f / 2.4f };
-    constexpr auto _0055f = float4{ 0.055f, 0.055f, 0.055f, 0.055f };
-    constexpr auto _1292f = float4{ 12.92f, 12.92f, 12.92f, 12.92f };
-    constexpr auto threshold = float4{ 0.0031308f, 0.0031308f, 0.0031308f, 0.0031308f };
+    constexpr float4 _1055f = { 1.055f, 1.055f, 1.055f, 1.055f };
+    constexpr float4 inv24f = { 1.0f / 2.4f, 1.0f / 2.4f, 1.0f / 2.4f, 1.0f / 2.4f };
+    constexpr float4 _0055f = { 0.055f, 0.055f, 0.055f, 0.055f };
+    constexpr float4 _1292f = { 12.92f, 12.92f, 12.92f, 12.92f };
+    constexpr float4 threshold = { 0.0031308f, 0.0031308f, 0.0031308f, 0.0031308f };
 
     float4 cutoff = rgb <= threshold;
 

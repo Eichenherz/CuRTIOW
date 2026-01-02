@@ -7,6 +7,8 @@
 #include "core_types.h"
 #include "cu_math.h"
 
+constexpr float RAY_EPSILON = 0.001f;
+
 // NOTE: the vecs are initialized to RH ( look at you RH palm )
 struct camera
 {
@@ -87,7 +89,7 @@ inline __host__ __device__ bool IsValidHit( const hit_record& hit )
 
 __host__ __device__ hit_record HitRayVsSphere( const ray& r, sphere_t sphere, float rayTMin, float rayTMax )
 {
-    float3 oc = sphere.center - r.origin;
+    float3 oc = ( r.origin - sphere.center ) * -1.0f; // NOTE: bc of Z dir 
     float a = dot( r.dir, r.dir );
     float c = dot( oc, oc ) - sphere.radius * sphere.radius;
     float h = dot( r.dir, oc );

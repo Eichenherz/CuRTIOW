@@ -16,28 +16,53 @@
 #include "cu_tex2d.h"
 
 #include "ray_tracing.h"
+#include "materials.h"
 
 constexpr u16 width = 1280;
 constexpr u16 height = 720;
 
-
-constexpr float3 LAMBERT = {};
-constexpr float3 METAL = {};
-constexpr float3 DIELECTRIC = {};
-
-struct material
-{
-    float3 albedo;
-    float ior;
-
-};
-
-struct world
+struct worldref
 {
     const sphere_t*      hittables;
     const material*      materials;
     u32                  count;
 };
+
+struct world
+{
+    thrust::device_vector<sphere_t> spheres;
+    thrust::device_vector<material> materials;
+
+    world()
+    {
+        std::vector<sphere_t> spheres;
+        spheres.push_back( { .center = { 0.0f, 0.0f, -1.0f }, .radius = 0.5f } );
+        spheres.push_back( { .center = { 0.0f, -100.5f, -1.0f }, .radius = 100.0f } );
+        spheres.push_back( { .center = { 1.0f, 0.0f, -1.0f }, .radius = 0.5f } );
+        spheres.push_back( { .center = {-1.0f, 0.0f, -1.0f }, .radius = 0.5f } );
+
+        std::vector<material> materials;
+        materials.push_back( { .albedo = { 0.8f, 0.8f, 0.0f }, .ior = 0.0f, .materialMask = LAMBERT } );
+        materials.push_back( { .albedo = { 0.1f, 0.2f, 0.5f }, .ior = 0.0f, .materialMask = LAMBERT } );
+        materials.push_back( { .albedo = { 0.8f, 0.8f, 0.8f }, .ior = 0.0f, .materialMask = METAL, .fuzz = 0.0f } );
+        materials.push_back( { .albedo = { 0.8f, 0.6f, 0.2f }, .ior = 0.0f, .materialMask = METAL, .fuzz = 1.0f } );
+
+
+        this->spheres = { std::cbegin( spheres ), std::cend( spheres ) };
+        this->materials = { std::cbegin( materials ), std::cend( materials ) };
+    }
+
+    inline worldref GetRef() const
+    {
+        assert( std::size( spheres ) == std::size( materials ) );
+        return {
+            .hittables = thrust::raw_pointer_cast( std::data( spheres ) ),
+            .materials = thrust::raw_pointer_cast( std::data( materials ) ),
+            .count = ( u32 ) std::size( spheres )
+        };
+    }
+};
+
 
 struct globals
 {
@@ -51,19 +76,14 @@ struct globals
 // NOTE: these must be properly alligned
 __constant__ globals globs;
 
-inline __device__ float3 Shade( const ray& r )
+inline __device__ float3 Shade( const ray_t& r )
 {
     float t = 0.5f * r.dir.y + 0.5f;
     float3 col = lerp( float3{ 1.0f, 1.0f, 1.0f }, float3{ 0.5f, 0.7f, 1.0f }, t );
     return col;
 };
 
-//__device__ Scatter()
-//{
-//
-//}
-
-__global__ void RenderKernel( cudaSurfaceObject_t fbSurf, const world w, u32 frameIdx ) 
+__global__ void RenderKernel( cudaSurfaceObject_t fbSurf, const worldref w, u32 frameIdx ) 
 {
     u32 xi = threadIdx.x + blockIdx.x * blockDim.x;
     u32 yi = threadIdx.y + blockIdx.y * blockDim.y;
@@ -84,22 +104,22 @@ __global__ void RenderKernel( cudaSurfaceObject_t fbSurf, const world w, u32 fra
         float3 worldPos = xyz( worldHmgPos ) / worldHmgPos.w;
         float3 rayDir = normalize( worldPos - mainCam.pos );
 
-        ray currentRay = { .origin = mainCam.pos, .dir = rayDir };
-        constexpr float reflectionFactor = 0.3f;
+        ray_t currentRay = { .origin = mainCam.pos, .dir = rayDir };
 
-        float3 attenuationFactor = { 1.0f, 1.0f, 1.0f };
+        float3 energyFactor = { 1.0f, 1.0f, 1.0f };
         u32 pathSeed = baseSeed ^ ( si * PRIME3 );
         for( u32 bi = 0; bi < globs.maxBounces; ++bi )
         {
             // NOTE: Russian Roulette
             if( bi > 3 )
             {
-                float p = max( attenuationFactor.x, max( attenuationFactor.y, attenuationFactor.z ) );
+                float survivalChance = max( energyFactor.x, max( energyFactor.y, energyFactor.z ) );
                 float shootChance = RandUnitFloat( bi, pathSeed );
-                if( shootChance > p ) break;
-                attenuationFactor /= p; // NOTE: Energy conservation boost
+                if( shootChance > survivalChance ) break;
+                energyFactor /= survivalChance; // NOTE: Energy conservation boost
             }
 
+            u32 primitiveIdx = 0;
             hit_record rec = INVALID_HIT;
             float closestSoFar = CUDART_INF_F;
             for( u32 hi = 0; hi < w.count; ++hi )
@@ -110,20 +130,22 @@ __global__ void RenderKernel( cudaSurfaceObject_t fbSurf, const world w, u32 fra
                 {
                     closestSoFar = hit.t;
                     rec = hit;
+                    primitiveIdx = hi;
                 }
             }
 
             if( IsValidHit( rec ) )
             {
-                float3 unitRand = RandUnitFloat3( bi, pathSeed ) * 2.0f - 1.0f; // NOTE: need float3 in [-1; 1] 
-                float3 lamberitanReflectionDistr = rec.normal + unitRand;
+                const material& mat = w.materials[ primitiveIdx ];
 
-                currentRay = { .origin = rec.point, .dir = normalize( lamberitanReflectionDistr ) };
-                attenuationFactor *= reflectionFactor;
+                auto[ scatterDir, attenuation ] = Scatter( mat, currentRay.dir, rec.normal, bi, pathSeed );
+
+                currentRay = { .origin = rec.point, .dir = scatterDir };
+                energyFactor *= attenuation;
             }
             else
             {
-                accColor += Shade( currentRay ) * attenuationFactor;
+                accColor += Shade( currentRay ) * energyFactor;
                 break;
             }
         }   
@@ -170,18 +192,14 @@ int main()
         .width = width,
         .height = height,
         .samplesPerPixel = 50,
-        .maxBounces = 5
+        .maxBounces = 10
     };
 
     CUDA_CHECK( cudaMemcpyToSymbol( globs, &g, sizeof( g ) ) );
 
-    std::vector<sphere_t> spheres;
-    spheres.push_back( { .center = { 0.0f, 0.0f, -1.0f }, .radius = 0.5f } );
-    spheres.push_back( { .center = { 0.0f, -100.5f, -1.0f }, .radius = 100.0f } );
+    auto pWorld = std::make_shared<world>();
 
-    thrust::device_vector<sphere_t> dSpheres = { std::cbegin( spheres ), std::cend( spheres ) };
-
-    world w = { .hittables = thrust::raw_pointer_cast( std::data( dSpheres ) ), .count = ( u32 ) std::size( dSpheres ) };
+    worldref worldView = pWorld->GetRef();
 
     u32 frameIdx = 0;
 
@@ -189,7 +207,7 @@ int main()
     u32 ty = 8;
     
     dim3 blocks( ( width + tx - 1 ) / tx, ( height + ty - 1 ) / ty );
-    RenderKernel<<<blocks, dim3( tx, ty )>>>( pGradTex->surf, w, frameIdx );
+    RenderKernel<<<blocks, dim3( tx, ty )>>>( pGradTex->surf, worldView, frameIdx );
     CUDA_CHECK( cudaGetLastError() );
     CUDA_CHECK( cudaDeviceSynchronize() );
 

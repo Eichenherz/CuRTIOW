@@ -51,13 +51,13 @@ inline __host__ camera MakeCamRH( u32 width, u32 height, float fovYRad = 1.570f,
     return cam;
 }
 
-struct ray
+struct ray_t
 {
     alignas( 16 ) float3 origin;
     alignas( 16 ) float3 dir;
 };
 
-inline __host__ __device__ float3 RayAt( const ray& r, float t )
+inline __host__ __device__ float3 RayAt( const ray_t& r, float t )
 {
     return r.origin + t * r.dir;
 }
@@ -75,7 +75,6 @@ struct alignas( 16 ) hit_record
     float3 point;
     float t;
     float3 normal;
-    bool frontFace;
 };
 
 constexpr hit_record INVALID_HIT = { .t = NO_HIT };
@@ -87,9 +86,9 @@ inline __host__ __device__ bool IsValidHit( const hit_record& hit )
 }
 
 
-__host__ __device__ hit_record HitRayVsSphere( const ray& r, sphere_t sphere, float rayTMin, float rayTMax )
+__host__ __device__ hit_record HitRayVsSphere( const ray_t& r, sphere_t sphere, float rayTMin, float rayTMax )
 {
-    float3 oc = ( r.origin - sphere.center ) * -1.0f; // NOTE: bc of Z dir 
+    float3 oc = sphere.center - r.origin; // NOTE: bc of Z dir 
     float a = dot( r.dir, r.dir );
     float c = dot( oc, oc ) - sphere.radius * sphere.radius;
     float h = dot( r.dir, oc );
@@ -116,7 +115,7 @@ __host__ __device__ hit_record HitRayVsSphere( const ray& r, sphere_t sphere, fl
     float3 n = ( p - sphere.center ) / sphere.radius;
     bool isFrontFace = dot( r.dir, n ) < 0;
 
-    return { .point = p, .t = root, .normal = isFrontFace ? n : -n, .frontFace = isFrontFace };
+    return { .point = p, .t = root, .normal = isFrontFace ? n : -n };
 }
 
 #endif // !__RAY_TRACING_H__

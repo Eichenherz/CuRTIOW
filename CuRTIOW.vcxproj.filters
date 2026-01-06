@@ -17,5 +17,6 @@
     <ClInclude Include="ray_tracing.h" />
     <ClInclude Include="cu_rand.h" />
     <ClInclude Include="cu_tex2d.h" />
+    <ClInclude Include="materials.h" />
   </ItemGroup>
 </Project>

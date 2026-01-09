@@ -74,7 +74,7 @@ struct alignas( 16 ) hit_record
 {
     float3 point;
     float t;
-    float3 normal;
+    float3 worldNormal;
 };
 
 constexpr hit_record INVALID_HIT = { .t = NO_HIT };
@@ -113,9 +113,8 @@ __host__ __device__ hit_record HitRayVsSphere( const ray_t& r, sphere_t sphere, 
     float root = r0Valid ? root0 : root1;
     float3 p = RayAt( r, root );
     float3 n = ( p - sphere.center ) / sphere.radius;
-    bool isFrontFace = dot( r.dir, n ) < 0;
 
-    return { .point = p, .t = root, .normal = isFrontFace ? n : -n };
+    return { .point = p, .t = root, .worldNormal = n };
 }
 
 #endif // !__RAY_TRACING_H__

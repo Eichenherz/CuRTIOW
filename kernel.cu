@@ -36,17 +36,20 @@ struct world
     world()
     {
         std::vector<sphere_t> spheres;
-        spheres.push_back( { .center = { 0.0f, 0.0f, -1.0f }, .radius = 0.5f } );
+        spheres.push_back( { .center = { 0.0f, 0.0f, -1.2f }, .radius = 0.5f } );
         spheres.push_back( { .center = { 0.0f, -100.5f, -1.0f }, .radius = 100.0f } );
         spheres.push_back( { .center = { 1.0f, 0.0f, -1.0f }, .radius = 0.5f } );
         spheres.push_back( { .center = {-1.0f, 0.0f, -1.0f }, .radius = 0.5f } );
+        spheres.push_back( { .center = {-1.0f, 0.0f, -1.0f }, .radius = 0.4f } );
 
         std::vector<material> materials;
-        materials.push_back( { .albedo = { 0.8f, 0.8f, 0.0f }, .ior = 0.0f, .materialMask = LAMBERT } );
-        materials.push_back( { .albedo = { 0.1f, 0.2f, 0.5f }, .ior = 0.0f, .materialMask = LAMBERT } );
-        materials.push_back( { .albedo = { 0.8f, 0.8f, 0.8f }, .ior = 0.0f, .materialMask = METAL, .fuzz = 0.0f } );
-        materials.push_back( { .albedo = { 0.8f, 0.6f, 0.2f }, .ior = 0.0f, .materialMask = METAL, .fuzz = 1.0f } );
+        materials.push_back( { .albedo = { 0.8f, 0.8f, 0.0f }, .type = material_type::LAMBERT } );
+        materials.push_back( { .albedo = { 0.1f, 0.2f, 0.5f }, .type = material_type::LAMBERT } );
+        materials.push_back( { .albedo = { 0.9f, 0.7f, 0.1f }, .fuzz = 0.666f, .type = material_type::METAL } );
+        materials.push_back( { .ior = 1.5f, .type = material_type::DIELECTRIC } );
+        materials.push_back( { .ior = 1.0f / 1.5f, .type = material_type::DIELECTRIC } );
 
+        assert( std::size( spheres ) == std::size( materials ) );
 
         this->spheres = { std::cbegin( spheres ), std::cend( spheres ) };
         this->materials = { std::cbegin( materials ), std::cend( materials ) };
@@ -106,7 +109,7 @@ __global__ void RenderKernel( cudaSurfaceObject_t fbSurf, const worldref w, u32 
 
         ray_t currentRay = { .origin = mainCam.pos, .dir = rayDir };
 
-        float3 energyFactor = { 1.0f, 1.0f, 1.0f };
+        float3 energyFactor = make_float3( 1.0f );
         u32 pathSeed = baseSeed ^ ( si * PRIME3 );
         for( u32 bi = 0; bi < globs.maxBounces; ++bi )
         {
@@ -138,7 +141,7 @@ __global__ void RenderKernel( cudaSurfaceObject_t fbSurf, const worldref w, u32 
             {
                 const material& mat = w.materials[ primitiveIdx ];
 
-                auto[ scatterDir, attenuation ] = Scatter( mat, currentRay.dir, rec.normal, bi, pathSeed );
+                auto[ scatterDir, attenuation ] = Scatter( mat, currentRay.dir, rec.worldNormal, bi, pathSeed );
 
                 currentRay = { .origin = rec.point, .dir = scatterDir };
                 energyFactor *= attenuation;
@@ -192,7 +195,7 @@ int main()
         .width = width,
         .height = height,
         .samplesPerPixel = 50,
-        .maxBounces = 10
+        .maxBounces = 32
     };
 
     CUDA_CHECK( cudaMemcpyToSymbol( globs, &g, sizeof( g ) ) );

@@ -4,17 +4,31 @@
 #include <cuda_runtime.h>
 #include "cu_math.h"
 #include "cu_rand.h"
+#include "core_types.h"
 
-constexpr float3 LAMBERT = { 1.0f, 0.0f, 0.0f };
-constexpr float3 METAL = { 0.0f, 1.0f, 0.0f };
-constexpr float3 DIELECTRIC = { 0.0f, 0.0f, 1.0f };
+struct alignas( 16 ) pbr_material
+{
+    float3 baseColor;
+    float metallic;
+    float roughness;
+    float transmission;
+    float ior;
+    float specular;
+};
+
+enum material_type : u32
+{
+    LAMBERT,
+    METAL,
+    DIELECTRIC
+};
 
 struct alignas( 16 ) material
 {
-    float3 albedo;
-    float ior;
-    float3 materialMask;
-    float fuzz;
+    float3        albedo;
+    float         ior;
+    float         fuzz;
+    material_type type;
 };
 
 struct scatter_res_t
@@ -23,7 +37,7 @@ struct scatter_res_t
     alignas( 16 ) float3 attenuation;
 };
 
-inline __host__ __device__ float Schlick( float cosTheta, float refIdx )
+inline __host__ __device__ float ReflectanceSchlick( float cosTheta, float refIdx )
 {
     float r0 = ( 1.0f - refIdx ) / ( 1.0f + refIdx );
     r0 = r0 * r0;
@@ -32,48 +46,51 @@ inline __host__ __device__ float Schlick( float cosTheta, float refIdx )
     return ( 1.0f - r0 ) * inv5 + r0;
 }
 
-// NOTE: Branchless refract candidate: sqrtk is zero if total internal reflection
-inline __host__ __device__ float3 RefractBranchless( float3 dir, float3 surfNormal, float snellCoef )
+inline __host__ __device__ float3 Refract( float3 rayDir, float3 surfNormal, float snellCoef, float cosTheta )
 {
-    float dt = dot( dir, surfNormal );
-    float k = 1.0f - snellCoef * snellCoef * ( 1.0f - dt * dt );
-    float sqrtk = sqrtf( fmaxf( k, 0.0f ) );
-    return snellCoef * ( dir - surfNormal * dt ) - surfNormal * sqrtk;
+    float3 rPerp = snellCoef * ( rayDir + cosTheta * surfNormal );
+    float3 rParallel = -std::sqrtf( std::fabsf( 1.0f - length_sq( rPerp ) ) ) * surfNormal;
+    return rPerp + rParallel;
 }
 
 // TODO: check for degenerate scatter dir
 __device__ scatter_res_t Scatter( const material& mat, float3 rayDir, float3 surfNormal, u32 randSeqIdx, u32 seed )
 {
-    float sumWeightsEps = mat.materialMask.x + mat.materialMask.y + mat.materialMask.z + 1e-6f;
-    float3 materialTypeWeights = mat.materialMask / sumWeightsEps;
+    float3 noise = RandUnitFloat3( randSeqIdx, seed );
+    float randVar = noise.x;
+    noise = noise * 2.0f - 1.0f; // NOTE: need float3 in [-1; 1] 
 
-    float3 unitSquareRand = RandUnitFloat3( randSeqIdx, seed ) * 2.0f - 1.0f; // NOTE: need float3 in [-1; 1] 
+    float3 lambertDir = normalize( surfNormal + noise );
 
-    float3 lambertDir = normalize( surfNormal + unitSquareRand );
+    float3 scatterDir = lambertDir;
+    if( material_type::METAL == mat.type )
+    {
+        float3 reflDir = reflect( rayDir, surfNormal );
+        float3 metalDir = normalize( reflDir + mat.fuzz * noise );
+        scatterDir = metalDir;
+    }
+    else if( material_type::DIELECTRIC == mat.type )
+    {
+        bool isFrontFace = dot( rayDir, surfNormal ) < 0;
+        float3 outwardNormal = isFrontFace ? surfNormal : -surfNormal;
 
-    float3 reflDir = reflect( rayDir, surfNormal );
+        float cosTheta = fminf( dot( -rayDir, outwardNormal ), 1.0f );
+        float sinTheta = sqrtf( fmaxf( 0.0f, 1.0f - cosTheta * cosTheta ) );
 
-    float3 metalDir = normalize( reflDir + mat.fuzz * unitSquareRand );
+        float refractionIndex = isFrontFace ? ( 1.0f / mat.ior ) : mat.ior;
 
-    //float cosTheta = fminf( dot( -rayDir, surfNormal ), 1.0f );
-    //float sinTheta = sqrtf( fmaxf( 0.0f, 1.0f - cosTheta * cosTheta ) );
-    //bool isFrontFace = dot( rayDir, surfNormal ) < 0;
-    //float snellLawCoef = isFrontFace ? ( 1.0f / mat.ior ) : mat.ior;
-    //float cannotRefract = snellLawCoef * sinTheta > 1.0f;
-    //float reflectProb = cannotRefract + ( 1.0f - cannotRefract ) * Schlick( cosTheta, mat.ior );
-    //float isReflect = unitSquareRand.x < reflectProb;
-    //
-    //float3 refracted = RefractBranchless( rayDir, surfNormal, snellLawCoef );
-    //float3 dielecDir = isReflect * reflDir + ( 1.0f - isReflect ) * refracted;
+        bool cannotRefract = refractionIndex * sinTheta > 1.0f;
+        bool isReflectance = ReflectanceSchlick( cosTheta, refractionIndex ) > randVar;
 
+        float3 dielecDir = ( isReflectance || cannotRefract ) ? 
+            reflect( rayDir, outwardNormal ) : 
+            Refract( rayDir, outwardNormal, refractionIndex, cosTheta );
+        scatterDir = normalize( dielecDir );
+    }
 
-    float3 scatterDir = lambertDir * materialTypeWeights.x + metalDir * materialTypeWeights.y;// +dielecDir * materialTypeWeights.z;
+    float3 attenuation = ( material_type::DIELECTRIC == mat.type ) ? make_float3( 1.0f ) : mat.albedo;
 
-    float lambertMetalMask = materialTypeWeights.x + materialTypeWeights.y;
-    float3 att = materialTypeWeights.z * float3{ 1.0f, 1.0f, 1.0f } + mat.albedo * lambertMetalMask;
-    float3 attenuation = att * sumWeightsEps;
-
-    return { .dir = scatterDir, .attenuation =  mat.albedo };
+    return { .dir = scatterDir, .attenuation = attenuation };
 }
 
 #endif // !__MATERIALS_H__

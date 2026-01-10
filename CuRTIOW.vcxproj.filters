@@ -18,5 +18,6 @@
     <ClInclude Include="cu_rand.h" />
     <ClInclude Include="cu_tex2d.h" />
     <ClInclude Include="materials.h" />
+    <ClInclude Include="win32_include.h" />
   </ItemGroup>
 </Project>

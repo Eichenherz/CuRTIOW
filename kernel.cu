@@ -5,6 +5,15 @@
 
 #include <thrust/device_vector.h>
 
+#include <SDL3/SDL.h>
+
+#include "win32_include.h"
+#include <d3d11.h>
+#include <dxgi.h>
+
+#include <cuda_d3d11_interop.h>
+
+
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
 
@@ -20,6 +29,209 @@
 
 constexpr u16 width = 1280;
 constexpr u16 height = 720;
+
+constexpr char WINDOW_TITLE[] = "CuRTIOW";
+
+void SdlCheck( bool failed, const char* file, const int line )
+{
+    if( failed )
+    {
+        SDL_Log( "Failed at %s:%d with: %s", file, line, SDL_GetError() );
+        abort();
+    }
+}
+
+#define SDL_CHECK( val ) SdlCheck( val, __FILE__, __LINE__ )
+
+using engine_loop_t = void( * )( );
+
+struct sdl_platform
+{
+    SDL_Window*     wnd;
+
+    inline sdl_platform( i32 windowWidth, i32 windowHeight, const char* windowTitle )
+    {
+        SDL_CHECK( !SDL_Init( SDL_INIT_VIDEO | SDL_INIT_EVENTS ) );
+
+       wnd = SDL_CreateWindow( windowTitle, windowWidth, windowHeight, SDL_WINDOW_HIGH_PIXEL_DENSITY );
+       SDL_CHECK( nullptr == wnd );
+    }
+
+    inline ~sdl_platform()
+    {
+        if( wnd ) SDL_DestroyWindow( wnd );
+        SDL_Quit();
+    }
+
+    inline void RunLoop( engine_loop_t EngineLoop )
+    {
+        static bool quit = false;
+        while( !quit )
+        {
+            for( SDL_Event e; SDL_PollEvent( &e );)
+            {
+                quit = ( SDL_EVENT_QUIT == e.type ) || ( SDL_EVENT_TERMINATING == e.type );
+                if( quit ) break;
+
+                EngineLoop();
+            }
+        }
+    }
+};
+
+// NOTE: ComPtr bullshit
+template<typename T>
+struct dx_releaser
+{
+    inline void operator()( T* ptr ) const noexcept
+    {
+        if( ptr ) ptr->Release();
+    }
+};
+
+template<typename T>
+using dx_unique = std::unique_ptr<T, dx_releaser<T>>;
+template<typename T>
+using dx_shared = std::shared_ptr<T>;
+
+template<typename T>
+inline dx_shared<T> MakeDxSharedFromRaw( T* raw )
+{
+    return dx_shared<T>{ raw, dx_releaser<T>{} };
+}
+
+void HresultCheck( HRESULT hr )
+{
+    if( SUCCEEDED( hr ) ) return;
+
+    char* msg = nullptr;
+
+    DWORD dwFlags = FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_IGNORE_INSERTS;
+    FormatMessageA(
+        dwFlags, nullptr, hr, MAKELANGID( LANG_NEUTRAL, SUBLANG_DEFAULT ), ( LPSTR ) &msg, 0, nullptr );
+
+    if( msg )
+    {
+        std::cout << "HRESULT Failed: 0x" << std::hex << hr << " - " << msg;
+        LocalFree( msg );
+    }
+    else
+    {
+        std::cout << "HRESULT Failed: 0x" << std::hex << hr << " (Unknown error)\n";
+    }
+}
+
+#define HR_CHECK( hr ) HresultCheck( hr )
+
+// TODO: make sure we create on the same device as CUDA !
+struct dx11_context
+{
+    static constexpr u32                      SWAPCHAIN_IMG_COUNT = 3;
+    static constexpr DXGI_FORMAT              SWAPCHAIN_FORMAT = DXGI_FORMAT_R8G8B8A8_UNORM;
+
+    dx_unique<ID3D11Device>                   device;
+    dx_unique<ID3D11DeviceContext>            context;
+    dx_unique<IDXGISwapChain>                 swapchain;
+
+    dx_shared<ID3D11Texture2D>                backbuffers[ SWAPCHAIN_IMG_COUNT ];
+    dx_shared<ID3D11RenderTargetView>         rtvs[ SWAPCHAIN_IMG_COUNT ];
+
+    D3D_FEATURE_LEVEL                         featureLevel;
+
+    // TODO: dynamically get machine correct SC desc !
+    dx11_context( SDL_Window* wnd )
+    {
+        assert( nullptr != wnd );
+
+        auto winProperties = SDL_GetWindowProperties( wnd );
+        auto hwnd = ( HWND ) SDL_GetPointerProperty( winProperties, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr );
+
+        i32 widthInPixels, heightInPixels;
+        SDL_CHECK( !SDL_GetWindowSizeInPixels( wnd, &widthInPixels, &heightInPixels ) );
+
+        DXGI_SWAP_CHAIN_DESC scDesc = {
+            .BufferDesc = {
+                .Width = ( u32 ) widthInPixels,
+                .Height = ( u32 ) heightInPixels,
+                .RefreshRate = {.Numerator = 60, .Denominator = 1 },
+                .Format = SWAPCHAIN_FORMAT,
+            },
+            .SampleDesc = {.Count = 1, .Quality = 0 },
+            .BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            .BufferCount = SWAPCHAIN_IMG_COUNT,
+            .OutputWindow = hwnd,
+            .Windowed = TRUE,
+            .SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL
+        };
+
+        UINT createFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    #ifdef _DEBUG
+        createFlags |= D3D11_CREATE_DEVICE_DEBUG;
+    #endif
+
+        ID3D11Device* rawDevice = nullptr;
+        ID3D11DeviceContext* rawContext = nullptr;
+        IDXGISwapChain* rawSwapchain = nullptr;
+        HR_CHECK( D3D11CreateDeviceAndSwapChain(
+            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, createFlags, nullptr, 0, D3D11_SDK_VERSION,
+            &scDesc, &rawSwapchain, &rawDevice, &featureLevel, &rawContext
+        ) );
+
+        device = dx_unique<ID3D11Device>{ rawDevice };
+        context = dx_unique<ID3D11DeviceContext>{ rawContext };
+        swapchain = dx_unique<IDXGISwapChain>{ rawSwapchain };
+
+        for( u32 sci = 0; sci < SWAPCHAIN_IMG_COUNT; ++sci )
+        {
+            ID3D11Texture2D* thisScImg;
+            HR_CHECK( swapchain->GetBuffer( sci, IID_PPV_ARGS( &thisScImg ) ) );
+            ID3D11RenderTargetView* thisScView;
+            HR_CHECK( device->CreateRenderTargetView( thisScImg, nullptr, &thisScView ) );
+
+            backbuffers[ sci ] = MakeDxSharedFromRaw( thisScImg );
+            rtvs[ sci ] = MakeDxSharedFromRaw( thisScView );
+        }
+
+        D3D11_VIEWPORT vp = {
+            .TopLeftX = 256,
+            .TopLeftY = 256,
+            .Width = ( float ) widthInPixels,
+            .Height = ( float ) heightInPixels,
+            .MinDepth = 0.0f,
+            .MaxDepth = 1.0f
+        };
+        context->RSSetViewports( 1, &vp );
+    }
+};
+
+inline cudaGraphicsResource* Dx11RegisterCudaInterOpTex( ID3D11Texture2D* dx11Tex )
+{
+    cudaGraphicsResource* cudaRes = nullptr;
+    CUDA_CHECK( cudaGraphicsD3D11RegisterResource( &cudaRes, dx11Tex, cudaGraphicsRegisterFlagsWriteDiscard ) );
+
+    return cudaRes;
+}
+
+struct cuda_dx11_mapped_array
+{
+    cudaGraphicsResource* dx11Mapping;
+    cudaStream_t stream;
+    cudaArray_t mem;
+
+    inline cuda_dx11_mapped_array( cudaGraphicsResource* dx11Rsc, cudaStream_t s )
+    {
+        dx11Mapping = dx11Rsc;
+        stream = s;
+
+        CUDA_CHECK( cudaGraphicsMapResources( 1, &dx11Mapping, stream ) );
+        CUDA_CHECK( cudaGraphicsSubResourceGetMappedArray( &mem, dx11Mapping, 0, 0 ) );
+    }
+
+    inline ~cuda_dx11_mapped_array()
+    {
+        CUDA_CHECK( cudaGraphicsUnmapResources( 1, &dx11Mapping, stream ) );
+    }
+};
 
 struct worldref
 {
@@ -178,6 +390,36 @@ struct cuda_context
         // NOTE: cudaDeviceReset must be called before exiting in order for profiling and
         // tracing tools such as Nsight and Visual Profiler to show complete traces.
         CUDA_CHECK( cudaDeviceReset() );
+    }
+};
+
+struct renderer_state
+{
+    dx11_context              dx11;
+    sdl_platform              platform;
+    cuda_context              cu;
+    cudaGraphicsResource*     swapchainViews[ dx11_context::SWAPCHAIN_IMG_COUNT ] = {};
+
+    renderer_state() : platform{ width, height, WINDOW_TITLE }, dx11{ platform.wnd }, cu{}
+    {
+        for( u32 sci = 0; sci < dx11_context::SWAPCHAIN_IMG_COUNT; ++sci )
+        {
+            swapchainViews[ sci ] = Dx11RegisterCudaInterOpTex( dx11.backbuffers[ sci ].get() );
+        }
+    }
+
+    ~renderer_state()
+    {
+        for( cudaGraphicsResource*& pScView : swapchainViews )
+        {
+            if( nullptr == pScView ) continue;
+            CUDA_CHECK( cudaGraphicsUnregisterResource( pScView ) );
+            pScView = nullptr;
+        }
+
+        cu.~cuda_context();
+        dx11.~dx11_context();
+        platform.~sdl_platform();
     }
 };
 

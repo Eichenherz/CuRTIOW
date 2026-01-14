@@ -9,13 +9,14 @@
 #include "dx11_tex.h"
 
 // TODO: is this more efficient than a copy ?
+template<bool DBG_WITH_SURFACE>
 struct interop_mapped_resource
 {
     cudaGraphicsResource* dx11Mapping;
     cudaStream_t stream;
     cudaArray* mem;
 
-    cudaSurfaceObject_t surf;
+    cudaSurfaceObject_t surf = 0;
 
 
     inline interop_mapped_resource( cudaGraphicsResource* dx11Rsc, cudaStream_t s )
@@ -26,17 +27,21 @@ struct interop_mapped_resource
         CUDA_CHECK( cudaGraphicsMapResources( 1, &dx11Mapping, stream ) );
         CUDA_CHECK( cudaGraphicsSubResourceGetMappedArray( &mem, dx11Mapping, 0, 0 ) );
 
-        cudaResourceDesc resDesc = { .resType = cudaResourceTypeArray };
-        resDesc.res.array.array = mem;
-        CUDA_CHECK( cudaCreateSurfaceObject( &surf, &resDesc ) );
+        if( DBG_WITH_SURFACE )
+        {
+            cudaResourceDesc resDesc = { .resType = cudaResourceTypeArray };
+            resDesc.res.array.array = mem;
+            CUDA_CHECK( cudaCreateSurfaceObject( &surf, &resDesc ) );
+        }
     }
 
     inline ~interop_mapped_resource()
     {
-        CUDA_CHECK( cudaDestroySurfaceObject( surf ) );
+        if( surf ) CUDA_CHECK( cudaDestroySurfaceObject( surf ) );
         CUDA_CHECK( cudaGraphicsUnmapResources( 1, &dx11Mapping, stream ) );
     }
 };
+
 
 enum interop_mutex_key_t : u64
 {
@@ -75,7 +80,8 @@ struct interop_tex2d
         CUDA_CHECK( cudaGraphicsD3D11RegisterResource( &cudaView, dx11.rsc, cudaGraphicsRegisterFlagsNone ) );
     }
 
-    inline interop_mapped_resource GetMapped( cudaStream_t stream ) const
+    template<bool DBG_WITH_SURFACE>
+    inline interop_mapped_resource<DBG_WITH_SURFACE> GetMapped( cudaStream_t stream ) const
     {
         return { cudaView, stream };
     }

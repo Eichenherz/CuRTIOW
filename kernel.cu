@@ -231,9 +231,36 @@ struct cuda_context
 };
 
 
+#include <chrono>
+
+struct frame_timer 
+{
+    using steady_clk_t = std::chrono::steady_clock;
+
+    steady_clk_t::time_point start;
+    std::chrono::microseconds& duration;
+
+    inline frame_timer( std::chrono::microseconds& duration ) : duration{ duration }, start{ steady_clk_t::now() } {}
+    inline ~frame_timer()
+    {
+        auto end = steady_clk_t::now();
+        duration = std::chrono::duration_cast<std::chrono::microseconds>( end - start );
+    }
+};
+
+inline auto ToMiliseconds( std::chrono::microseconds duration )
+{
+    return std::chrono::duration<float, std::milli>( duration ).count();
+}
+
+// NOTE: DBG flag used to trigger between the surface "in-place" vs dedicated + copy impls !
+constexpr bool DBG_INPLACE_WORK = false;
+
 int main()
 {
     using pixel_t = uchar4;
+
+    std::ios::sync_with_stdio( false );
 
     // NOTE: init sub-systems
     auto pCu = std::make_unique<cuda_context>();
@@ -261,45 +288,51 @@ int main()
     static bool quit = false;
     for( u64 frameIdx = 0; !quit; ++frameIdx )
     {
-        for( SDL_Event e; SDL_PollEvent( &e );)
+        std::chrono::microseconds frameTime = {};
         {
-            quit = ( SDL_EVENT_QUIT == e.type ) || ( SDL_EVENT_TERMINATING == e.type );
-            if( quit ) break;
+            frame_timer frameTimer = { frameTime };
+            for( SDL_Event e; SDL_PollEvent( &e );)
+            {
+                quit = ( SDL_EVENT_QUIT == e.type ) || ( SDL_EVENT_TERMINATING == e.type );
+                if( quit ) break;
+            }
+
+            auto RenderLoop = [&] ( cudaSurfaceObject_t fbSurf ) {
+                GradientSurfaceKernel<<<blocks, dim3( tx, ty ), 0, pCu->mainStream>>>( fbSurf, width, height );
+                CUDA_CHECK( cudaGetLastError() );
+            };
+
+            if constexpr( !DBG_INPLACE_WORK )
+            {
+                RenderLoop( pGradTex->surf );
+                //CUDA_CHECK( cudaStreamSynchronize( pCu->mainStream ) );
+            }
+            // NOTE: interop copy stuff
+            {
+                auto scopedMtx = pInteropTex->GetScopedMutex<CUDA_ACQUIRE>();
+                auto mappedTex = pInteropTex->GetMapped<DBG_INPLACE_WORK>( pCu->mainStream );
+                if constexpr( DBG_INPLACE_WORK )
+                {
+                    RenderLoop( mappedTex.surf );
+                }
+                else
+                {
+                    // TODO: check it's the same size format/type
+                    u64 widthInBytes = pGradTex->width * pGradTex->elemPitch;
+                    CudaCopyTextureDeviceSync( pGradTex->array, mappedTex.mem, widthInBytes, pGradTex->height );
+                    CUDA_CHECK( cudaGetLastError() );
+                }
+
+            }
+
+            auto scopedMtx = pInteropTex->GetScopedMutex<DX11_ACQUIRE>();
+            pDx11->GetNextSwapchainImageCopyAndPresent( pInteropTex->dx11, false );
         }
 
-        {
-            auto scopedMtx = pInteropTex->GetScopedMutex<CUDA_ACQUIRE>();
-            auto mappedTex = pInteropTex->GetMapped( pCu->mainStream );
-
-            GradientSurfaceKernel<<<blocks, dim3( tx, ty ), 0, pCu->mainStream>>>( mappedTex.surf, width, height );
-            CUDA_CHECK( cudaGetLastError() );
-            //CUDA_CHECK( cudaStreamSynchronize( pCu->mainStream ) );
-        }
-        
-        
-        // NOTE: interop copy stuff
-        //{
-        //    auto scopedMtx = pInteropTex->GetScopedMutex<CUDA>();
-        //    auto mappedRsc = pInteropTex->GetMappedArray( pCu->mainStream );
-        //
-        //    cudaResourceDesc resDesc = { .resType = cudaResourceTypeArray };
-        //    resDesc.res.array.array = mappedRsc.mem;
-        //
-        //    cudaSurfaceObject_t surf = 0;
-        //    CUDA_CHECK(cudaCreateSurfaceObject(&surf, &resDesc));
-        //
-        //    // TODO: check it's the same size format/type
-        //    u64 widthInBytes = pGradTex->width * pGradTex->elemPitch;
-        //    CudaCopyTextureDeviceSync( pGradTex->array, mappedRsc.mem, widthInBytes, pGradTex->height );
-        //    CUDA_CHECK( cudaGetLastError() );
-        //}
-
-        auto scopedMtx = pInteropTex->GetScopedMutex<DX11_ACQUIRE>();
-        pDx11->GetNextSwapchainImageCopyAndPresent( pInteropTex->dx11 );
+        float frameTimeMs = ToMiliseconds( frameTime );
+        std::cout << "\rFrame " << frameIdx << " time ms " << frameTimeMs << std::flush;
     }
 
-    //cuda_context cudaCtx = {};
-    //
     //globals g = {
     //    .mainCam = MakeCamRH( width, height ),
     //    .width = width,
@@ -313,8 +346,6 @@ int main()
     //auto pWorld = std::make_shared<world>();
     //
     //worldref worldView = pWorld->GetRef();
-    //
-    //u32 frameIdx = 0;
     //
     //
     //RenderKernel<<<blocks, dim3( tx, ty )>>>( pGradTex->surf, worldView, frameIdx );

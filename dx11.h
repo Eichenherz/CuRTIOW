@@ -198,7 +198,7 @@ struct dx11_context
         };
     }
 
-    void GetNextSwapchainImageCopyAndPresent( const dx11_texture& srcTex )
+    void GetNextSwapchainImageCopyAndPresent( const dx11_texture& srcTex, bool vsync )
     {
         assert( srcTex.rsc );
 
@@ -206,7 +206,9 @@ struct dx11_context
         HR_CHECK( swapchain->GetBuffer( 0, IID_PPV_ARGS( &thisScImg ) ) );
 
         context->CopyResource( thisScImg, srcTex.rsc );
-        HR_CHECK( swapchain->Present( 1, 0 ) );
+
+        u32 syncInterval = vsync ? 1 : 0;
+        HR_CHECK( swapchain->Present( syncInterval, 0 ) );
 
         thisScImg->Release();
     }

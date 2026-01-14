@@ -9,7 +9,7 @@
 
 #include "win32_include.h"
 #include <d3d11.h>
-#include <dxgi.h>
+#include <dxgi1_6.h>
 
 #include <cuda_d3d11_interop.h>
 
@@ -23,6 +23,8 @@
 #include "cu_math.h"
 #include "cu_rand.h"
 #include "cu_tex2d.h"
+#include "warps.h"
+#include "cpp_helpers.h"
 
 #include "ray_tracing.h"
 #include "materials.h"
@@ -43,8 +45,6 @@ void SdlCheck( bool failed, const char* file, const int line )
 
 #define SDL_CHECK( val ) SdlCheck( val, __FILE__, __LINE__ )
 
-using engine_loop_t = void( * )( );
-
 struct sdl_platform
 {
     SDL_Window*     wnd;
@@ -62,21 +62,6 @@ struct sdl_platform
         if( wnd ) SDL_DestroyWindow( wnd );
         SDL_Quit();
     }
-
-    inline void RunLoop( engine_loop_t EngineLoop )
-    {
-        static bool quit = false;
-        while( !quit )
-        {
-            for( SDL_Event e; SDL_PollEvent( &e );)
-            {
-                quit = ( SDL_EVENT_QUIT == e.type ) || ( SDL_EVENT_TERMINATING == e.type );
-                if( quit ) break;
-
-                EngineLoop();
-            }
-        }
-    }
 };
 
 // NOTE: ComPtr bullshit
@@ -91,13 +76,11 @@ struct dx_releaser
 
 template<typename T>
 using dx_unique = std::unique_ptr<T, dx_releaser<T>>;
-template<typename T>
-using dx_shared = std::shared_ptr<T>;
 
 template<typename T>
-inline dx_shared<T> MakeDxSharedFromRaw( T* raw )
+inline auto MakeDxSharedFromRaw( T* raw )
 {
-    return dx_shared<T>{ raw, dx_releaser<T>{} };
+    return std::shared_ptr<T>{ raw, dx_releaser<T>{} };
 }
 
 void HresultCheck( HRESULT hr )
@@ -119,9 +102,31 @@ void HresultCheck( HRESULT hr )
     {
         std::cout << "HRESULT Failed: 0x" << std::hex << hr << " (Unknown error)\n";
     }
+    abort();
 }
 
 #define HR_CHECK( hr ) HresultCheck( hr )
+
+inline u64 LuidToU64( const LUID& luid )
+{
+    return ( u64( u32( luid.HighPart ) ) << 32 ) | u32( luid.LowPart );
+}
+
+struct dx11_texture
+{
+    ID3D11Texture2D*     rsc;
+    DXGI_FORMAT          format;
+    u16                  width;
+    u16                  height;
+
+    inline auto GetKeyedMutex() const
+    {
+        IDXGIKeyedMutex* keyedMutex = nullptr;
+        HR_CHECK( rsc->QueryInterface( IID_PPV_ARGS( &keyedMutex ) ) );
+
+        return dx_unique<IDXGIKeyedMutex>{ keyedMutex };
+    }
+};
 
 // TODO: make sure we create on the same device as CUDA !
 struct dx11_context
@@ -131,39 +136,47 @@ struct dx11_context
 
     dx_unique<ID3D11Device>                   device;
     dx_unique<ID3D11DeviceContext>            context;
-    dx_unique<IDXGISwapChain>                 swapchain;
+    dx_unique<IDXGISwapChain1>                swapchain;
 
-    dx_shared<ID3D11Texture2D>                backbuffers[ SWAPCHAIN_IMG_COUNT ];
-    dx_shared<ID3D11RenderTargetView>         rtvs[ SWAPCHAIN_IMG_COUNT ];
+    std::shared_ptr<ID3D11Texture2D>          backbuffer;
 
-    D3D_FEATURE_LEVEL                         featureLevel;
+    // NOTE: fuck ctors
+    dx11_context() = default;
 
     // TODO: dynamically get machine correct SC desc !
-    dx11_context( SDL_Window* wnd )
+    dx11_context( SDL_Window* wnd, const u64 desiredLuid )
     {
         assert( nullptr != wnd );
 
-        auto winProperties = SDL_GetWindowProperties( wnd );
-        auto hwnd = ( HWND ) SDL_GetPointerProperty( winProperties, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr );
+        // Create factory
+        IDXGIFactory2* rawFactory;
+        HR_CHECK( CreateDXGIFactory2( 0, IID_PPV_ARGS( &rawFactory ) ) );
+        auto factory = dx_unique<IDXGIFactory2>{ rawFactory };
 
-        i32 widthInPixels, heightInPixels;
-        SDL_CHECK( !SDL_GetWindowSizeInPixels( wnd, &widthInPixels, &heightInPixels ) );
+        // Get adapter
+        dx_unique<IDXGIAdapter1> gpu = nullptr;
+        u32 ai = 0;
+        for( 
+            IDXGIAdapter1* adapter = nullptr; 
+            factory->EnumAdapters1( ai, &adapter ) != DXGI_ERROR_NOT_FOUND; 
+            adapter->Release(), ++ai
+        ) {
+            DXGI_ADAPTER_DESC1 desc;
+            adapter->GetDesc1( &desc );
 
-        DXGI_SWAP_CHAIN_DESC scDesc = {
-            .BufferDesc = {
-                .Width = ( u32 ) widthInPixels,
-                .Height = ( u32 ) heightInPixels,
-                .RefreshRate = {.Numerator = 60, .Denominator = 1 },
-                .Format = SWAPCHAIN_FORMAT,
-            },
-            .SampleDesc = {.Count = 1, .Quality = 0 },
-            .BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT,
-            .BufferCount = SWAPCHAIN_IMG_COUNT,
-            .OutputWindow = hwnd,
-            .Windowed = TRUE,
-            .SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL
-        };
+            if( desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE ) continue;
 
+            u64 luid64 = LuidToU64( desc.AdapterLuid );
+            if( desiredLuid == luid64 )
+            {
+                gpu = dx_unique<IDXGIAdapter1>{ adapter };
+                break;
+            }
+        }
+
+        HR_CHECK( ( nullptr == gpu ) ? E_FAIL : 0 );
+
+        // Create device
         UINT createFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
     #ifdef _DEBUG
         createFlags |= D3D11_CREATE_DEVICE_DEBUG;
@@ -171,26 +184,41 @@ struct dx11_context
 
         ID3D11Device* rawDevice = nullptr;
         ID3D11DeviceContext* rawContext = nullptr;
-        IDXGISwapChain* rawSwapchain = nullptr;
-        HR_CHECK( D3D11CreateDeviceAndSwapChain(
-            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, createFlags, nullptr, 0, D3D11_SDK_VERSION,
-            &scDesc, &rawSwapchain, &rawDevice, &featureLevel, &rawContext
-        ) );
+
+        D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_11_1;
+        HR_CHECK( D3D11CreateDevice( gpu.get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, createFlags, nullptr, 0,
+                                     D3D11_SDK_VERSION, &rawDevice, &featureLevel, &rawContext ) );
 
         device = dx_unique<ID3D11Device>{ rawDevice };
         context = dx_unique<ID3D11DeviceContext>{ rawContext };
-        swapchain = dx_unique<IDXGISwapChain>{ rawSwapchain };
 
-        for( u32 sci = 0; sci < SWAPCHAIN_IMG_COUNT; ++sci )
-        {
-            ID3D11Texture2D* thisScImg;
-            HR_CHECK( swapchain->GetBuffer( sci, IID_PPV_ARGS( &thisScImg ) ) );
-            ID3D11RenderTargetView* thisScView;
-            HR_CHECK( device->CreateRenderTargetView( thisScImg, nullptr, &thisScView ) );
+        // Get hwnd
+        auto winProperties = SDL_GetWindowProperties( wnd );
+        auto hwnd = ( HWND ) SDL_GetPointerProperty( winProperties, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr );
 
-            backbuffers[ sci ] = MakeDxSharedFromRaw( thisScImg );
-            rtvs[ sci ] = MakeDxSharedFromRaw( thisScView );
-        }
+        // Create swapchain
+        i32 widthInPixels, heightInPixels;
+        SDL_CHECK( !SDL_GetWindowSizeInPixels( wnd, &widthInPixels, &heightInPixels ) );
+
+        DXGI_SWAP_CHAIN_DESC1 scDesc = {
+            .Width = ( u32 ) widthInPixels,
+            .Height = ( u32 ) heightInPixels,
+            .Format = SWAPCHAIN_FORMAT,
+            .SampleDesc = { .Count = 1, .Quality = 0 },
+            .BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            .BufferCount = SWAPCHAIN_IMG_COUNT,
+            .SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD,
+            .Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING
+        };
+
+        IDXGISwapChain1* rawSwapchain = nullptr;
+        HR_CHECK( factory->CreateSwapChainForHwnd( device.get(), hwnd, &scDesc, nullptr, nullptr, &rawSwapchain ) );
+        swapchain = dx_unique<IDXGISwapChain1>{ rawSwapchain };
+
+        // NOTE: unlike Vk/DX12 we don't manually acquire SC images, we only use img0 in dx11
+        ID3D11Texture2D* thisScImg = nullptr;
+        HR_CHECK( swapchain->GetBuffer( 0, IID_PPV_ARGS( &thisScImg ) ) );
+        backbuffer = MakeDxSharedFromRaw( thisScImg );
 
         D3D11_VIEWPORT vp = {
             .TopLeftX = 256,
@@ -202,15 +230,27 @@ struct dx11_context
         };
         context->RSSetViewports( 1, &vp );
     }
+
+    dx11_texture CreateTexture2D( u16 width, u16 height, DXGI_FORMAT format, u32 miscFlags )
+    {
+        D3D11_TEXTURE2D_DESC texDesc = {
+            .Width            = ( u32 ) width,
+            .Height           = ( u32 ) height,
+            .MipLevels        = 1,
+            .ArraySize        = 1,
+            .Format           = format,
+            .SampleDesc       = { .Count = 1 },
+            .Usage            = D3D11_USAGE_DEFAULT,
+            .BindFlags        = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
+            .CPUAccessFlags   = 0,
+            .MiscFlags        = miscFlags
+        };
+
+        ID3D11Texture2D* tex = nullptr;
+        HR_CHECK( device->CreateTexture2D( &texDesc, nullptr, &tex ) );
+        return { .rsc = tex, .format = texDesc.Format, .width = ( u16 ) texDesc.Width, .height = ( u16 ) texDesc.Height };
+    }
 };
-
-inline cudaGraphicsResource* Dx11RegisterCudaInterOpTex( ID3D11Texture2D* dx11Tex )
-{
-    cudaGraphicsResource* cudaRes = nullptr;
-    CUDA_CHECK( cudaGraphicsD3D11RegisterResource( &cudaRes, dx11Tex, cudaGraphicsRegisterFlagsWriteDiscard ) );
-
-    return cudaRes;
-}
 
 struct cuda_dx11_mapped_array
 {
@@ -377,10 +417,32 @@ __global__ void RenderKernel( cudaSurfaceObject_t fbSurf, const worldref w, u32 
 
 struct cuda_context
 {
-    inline cuda_context()
+    u64 luid;
+    u32 deviceIdx;
+
+    cuda_context()
     {
-        // NOTE: Choose which GPU to run on, change this on a multi-GPU system.
-        CUDA_CHECK( cudaSetDevice( 0 ) );
+        i32  deviceCount;
+        CUDA_CHECK( cudaGetDeviceCount( &deviceCount ) );
+        CUDA_CHECK( ( 0 == deviceCount ) ? cudaError( -1 ) : cudaError::cudaSuccess );
+
+        cudaDeviceProp deviceProp;
+        // TODO: check device props ?
+        for( u32 di = 0; di < deviceCount; ++di )
+        {
+            CUDA_CHECK( cudaGetDeviceProperties( &deviceProp, di ) );
+            CUDA_CHECK( ( WARP_SIZE != deviceProp.warpSize ) ? cudaError( -1 ) : cudaError::cudaSuccess );
+
+            std::memcpy( &luid, deviceProp.luid, sizeof( deviceProp.luid ) );
+            deviceIdx = di;
+
+            break;
+        }
+
+        printf( "CUDA GPU %d: %s\n", deviceIdx, deviceProp.name );
+
+        CUDA_CHECK( cudaSetDevice( deviceIdx ) );
+
         //CUDA_CHECK( cudaDeviceSetLimit( cudaLimitStackSize, 16000 ) );
         //CUDA_CHECK( cudaDeviceSetCacheConfig( cudaFuncCachePreferL1 ) );
     }
@@ -393,30 +455,80 @@ struct cuda_context
     }
 };
 
+struct interop_tex2d
+{
+    dx11_texture                  dx11;
+    cudaGraphicsResource*         cudaView;
+    dx_unique<IDXGIKeyedMutex>    keyedMutex;
+};
+
+enum interop_dir_t : u32
+{
+    DX11_TO_CUDA = 0,
+    CUDA_TO_DX11 = 1,
+};
+
+template<interop_dir_t INTEROP_DIR>
+struct scoped_interop_mutex
+{
+    IDXGIKeyedMutex* mtx;
+    scoped_interop_mutex( IDXGIKeyedMutex* mtx ) : mtx{ mtx }
+    {
+        HR_CHECK( mtx->AcquireSync( INTEROP_DIR, INFINITE ) );
+    }
+
+    ~scoped_interop_mutex()
+    {
+        u64 flippedOwnership = INTEROP_DIR ^ 1;
+        HR_CHECK( mtx->ReleaseSync( flippedOwnership ) );
+    }
+
+    NON_COPYABLE( scoped_interop_mutex );
+};
+
+inline auto CreateInteropTex2D( const dx11_texture& dx11Tex )
+{
+    assert( nullptr != dx11Tex.rsc );
+
+    interop_tex2d tex2d = { .dx11 = dx11Tex, .keyedMutex = dx11Tex.GetKeyedMutex() };
+    CUDA_CHECK( cudaGraphicsD3D11RegisterResource( &tex2d.cudaView, tex2d.dx11.rsc, cudaGraphicsRegisterFlagsNone ) );
+
+    return tex2d;
+}
+
+inline void DestroyInteropTex2D( interop_tex2d& interopTex )
+{
+    if( interopTex.cudaView )
+    {
+        CUDA_CHECK( cudaGraphicsUnregisterResource( interopTex.cudaView ) );
+        interopTex.cudaView = nullptr;
+    }
+    if( interopTex.dx11.rsc )
+    {
+        u64 refs = interopTex.dx11.rsc->Release();
+        interopTex.dx11.rsc = nullptr;
+        assert( 0 == refs );
+    }
+}
+
 struct renderer_state
 {
     dx11_context              dx11;
-    sdl_platform              platform;
+    interop_tex2d             cudaDx11InteropTex;
     cuda_context              cu;
-    cudaGraphicsResource*     swapchainViews[ dx11_context::SWAPCHAIN_IMG_COUNT ] = {};
+    sdl_platform              platform;
 
-    renderer_state() : platform{ width, height, WINDOW_TITLE }, dx11{ platform.wnd }, cu{}
+    renderer_state() : cu{}, platform{ width, height, WINDOW_TITLE }  
     {
-        for( u32 sci = 0; sci < dx11_context::SWAPCHAIN_IMG_COUNT; ++sci )
-        {
-            swapchainViews[ sci ] = Dx11RegisterCudaInterOpTex( dx11.backbuffers[ sci ].get() );
-        }
+        dx11 = { platform.wnd, cu.luid };
+        dx11_texture dx11Tex = dx11.CreateTexture2D( 
+            width, height, dx11_context::SWAPCHAIN_FORMAT, D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX /* NOTE: NEEDED FOR INTEROP */ );
+        cudaDx11InteropTex = CreateInteropTex2D( dx11Tex );
     }
 
     ~renderer_state()
     {
-        for( cudaGraphicsResource*& pScView : swapchainViews )
-        {
-            if( nullptr == pScView ) continue;
-            CUDA_CHECK( cudaGraphicsUnregisterResource( pScView ) );
-            pScView = nullptr;
-        }
-
+        DestroyInteropTex2D( cudaDx11InteropTex );
         cu.~cuda_context();
         dx11.~dx11_context();
         platform.~sdl_platform();
@@ -426,6 +538,22 @@ struct renderer_state
 int main()
 {
     using pixel_t = uchar4;
+
+    auto pRenderer = std::make_unique<renderer_state>();
+
+    const dx11_context& dx11 = pRenderer->dx11;
+
+    static bool quit = false;
+    while( !quit )
+    {
+        for( SDL_Event e; SDL_PollEvent( &e );)
+        {
+            quit = ( SDL_EVENT_QUIT == e.type ) || ( SDL_EVENT_TERMINATING == e.type );
+            if( quit ) break;
+        }
+
+        HR_CHECK( dx11.swapchain->Present( 1, 0 ) );
+    }
 
     cuda_context cudaCtx = {};
 

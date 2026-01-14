@@ -13,9 +13,8 @@ inline void CudaCheckErr( cudaError_t err, const char const* file, const int lin
     if( err )
     {
         fprintf( stderr, "CUDA ERROR %s:%d: %s (%d)\n", file, line, cudaGetErrorString( err ), err );
-        assert( false );
         cudaDeviceReset();
-        std::exit( 99 );
+        abort();
     }
 }
 

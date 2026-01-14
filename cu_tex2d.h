@@ -98,4 +98,14 @@ inline auto CudaCopyImageToHostSync( const cuda_tex2d& tex2d )
     return out;
 }
 
+inline void CudaCopyTextureDeviceSync( 
+    const cudaArray*     srcArray,
+    cudaArray*           dstArray, 
+    u64                  widthInBytes, 
+    u64                  heightInPixels 
+) {
+    CUDA_CHECK( cudaMemcpy2DArrayToArray( 
+        dstArray, 0, 0, srcArray, 0, 0, widthInBytes, heightInPixels, cudaMemcpyDeviceToDevice ) );
+}
+
 #endif // !__CU_TEX2D_H__

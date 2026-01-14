@@ -102,12 +102,16 @@
     <ClInclude Include="core_types.h" />
     <ClInclude Include="cpp_helpers.h" />
     <ClInclude Include="cu_allocator.h" />
+    <ClInclude Include="cu_dx11_interop.h" />
     <ClInclude Include="cu_errors.h" />
     <ClInclude Include="cu_math.h" />
     <ClInclude Include="cu_rand.h" />
     <ClInclude Include="cu_tex2d.h" />
+    <ClInclude Include="dx11.h" />
+    <ClInclude Include="dx11_tex.h" />
     <ClInclude Include="materials.h" />
     <ClInclude Include="ray_tracing.h" />
+    <ClInclude Include="sdl_platform.h" />
     <ClInclude Include="warps.h" />
     <ClInclude Include="win32_include.h" />
   </ItemGroup>

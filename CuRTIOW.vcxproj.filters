@@ -20,5 +20,9 @@
     <ClInclude Include="materials.h" />
     <ClInclude Include="win32_include.h" />
     <ClInclude Include="cpp_helpers.h" />
+    <ClInclude Include="sdl_platform.h" />
+    <ClInclude Include="dx11.h" />
+    <ClInclude Include="cu_dx11_interop.h" />
+    <ClInclude Include="dx11_tex.h" />
   </ItemGroup>
 </Project>

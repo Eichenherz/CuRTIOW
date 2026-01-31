@@ -2,6 +2,7 @@
 #include <device_launch_parameters.h>
 
 #include <memory>
+#include <chrono>
 
 #include <thrust/device_vector.h>
 
@@ -24,54 +25,124 @@
 #include "ray_tracing.h"
 #include "materials.h"
 
+#include <hp_serialization.h>
+#include <hp_error.h>
+#include <hp_mesh.h>
+
 constexpr u16 width = 1280;
 constexpr u16 height = 720;
 
 constexpr char WINDOW_TITLE[] = "CuRTIOW";
 
-
-struct worldref
+struct world_data
 {
-    const sphere_t*      hittables;
-    const material*      materials;
-    u32                  count;
+    thrust::device_vector<instance> instances;
+    thrust::device_vector<gpu_bvh2_node> globalTlasBuffer;
+    thrust::device_vector<gpu_bvh2_node> globalClasBuffer;
+    thrust::device_vector<rt_meshlet_info> meshletInfoBuffer;
+    thrust::device_vector<float3> globalVertexPosBuffer;
+    thrust::device_vector<packed_vtx> globalPackedVertexBuffer;
+    thrust::device_vector<u8> globalTriangleBuffer;
+
+    void UploadAssetFileData( const hellpack_view& hellpackView )
+    {
+        auto instView = hellpackView.Typed<instance>( hellpack_entry_slot::INST );
+        auto tlasView = hellpackView.Typed<gpu_bvh2_node>( hellpack_entry_slot::TLAS );
+        auto clasView = hellpackView.Typed<gpu_bvh2_node>( hellpack_entry_slot::CLAS );
+        auto mletView = hellpackView.Typed<rt_meshlet_info>( hellpack_entry_slot::MLET );
+        auto posView = hellpackView.Typed<float3>( hellpack_entry_slot::VPOS );
+        auto pvtxView = hellpackView.Typed<packed_vtx>( hellpack_entry_slot::PVTX );
+        auto triView = hellpackView.Typed<u8>( hellpack_entry_slot::TRI );
+
+        instances.resize( std::size( instView ) );
+        globalTlasBuffer.resize( std::size( tlasView ) );
+        globalClasBuffer.resize( std::size( clasView ) );
+        meshletInfoBuffer.resize( std::size( mletView ) );
+        globalVertexPosBuffer.resize( std::size( posView ) );
+        globalPackedVertexBuffer.resize( std::size( pvtxView ) );
+        globalTriangleBuffer.resize( std::size( triView ) );
+
+        CUDA_CHECK( cudaMemcpyAsync(
+            thrust::raw_pointer_cast( std::data( instances ) ),
+            std::data( instView ),
+            std::size( instView ) * sizeof( instView[ 0 ] ),
+            cudaMemcpyHostToDevice, 0 ) );
+
+        CUDA_CHECK( cudaMemcpyAsync(
+            thrust::raw_pointer_cast( std::data( globalTlasBuffer ) ),
+            std::data( tlasView ),
+            std::size( tlasView ) * sizeof( tlasView[ 0 ] ),
+            cudaMemcpyHostToDevice, 0 ) );
+
+        CUDA_CHECK( cudaMemcpyAsync(
+            thrust::raw_pointer_cast( std::data( globalClasBuffer ) ),
+            std::data( clasView ),
+            std::size( clasView ) * sizeof( clasView[ 0 ] ),
+            cudaMemcpyHostToDevice, 0 ) );
+
+        CUDA_CHECK( cudaMemcpyAsync(
+            thrust::raw_pointer_cast( std::data( meshletInfoBuffer ) ),
+            std::data( mletView ),
+            std::size( mletView ) * sizeof( mletView[ 0 ] ),
+            cudaMemcpyHostToDevice, 0 ) );
+
+        CUDA_CHECK( cudaMemcpyAsync(
+            thrust::raw_pointer_cast( std::data( globalVertexPosBuffer ) ),
+            std::data( posView ),
+            std::size( posView ) * sizeof( posView[ 0 ] ),
+            cudaMemcpyHostToDevice, 0 ) );
+
+        CUDA_CHECK( cudaMemcpyAsync(
+            thrust::raw_pointer_cast( std::data( globalPackedVertexBuffer ) ),
+            std::data( pvtxView ),
+            std::size( pvtxView ) * sizeof( pvtxView[ 0 ] ),
+            cudaMemcpyHostToDevice, 0 ) );
+
+        CUDA_CHECK( cudaMemcpyAsync(
+            thrust::raw_pointer_cast( std::data( globalTriangleBuffer ) ),
+            std::data( triView ),
+            std::size( triView ) * sizeof( triView[ 0 ] ),
+            cudaMemcpyHostToDevice, 0 ) );
+    }
 };
 
-struct world
+struct world_ref
 {
-    thrust::device_vector<sphere_t> spheres;
-    thrust::device_vector<material> materials;
+    const instance*         instances;
+    const gpu_bvh2_node*    globalTlasBuffer;
+    const gpu_bvh2_node*    globalClasBuffer;
+    const rt_meshlet_info*  meshletInfoBuffer;
+    const float3*           globalVertexPosBuffer;
+    const packed_vtx*       globalPackedVertexBuffer;
+    const u8*               globalTriangleBuffer;
 
-    world()
+    u32                     instanceCount;
+    u32                     tlasNodeCount;
+    u32                     clasNodeCount;
+    u32                     meshletCount;
+    u32                     vertexCount;
+    u32                     triangleByteCount;
+
+    inline world_ref( const world_data& w )
     {
-        std::vector<sphere_t> spheres;
-        spheres.push_back( { .center = { 0.0f, 0.0f, -1.2f }, .radius = 0.5f } );
-        spheres.push_back( { .center = { 0.0f, -100.5f, -1.0f }, .radius = 100.0f } );
-        spheres.push_back( { .center = { 1.0f, 0.0f, -1.0f }, .radius = 0.5f } );
-        spheres.push_back( { .center = {-1.0f, 0.0f, -1.0f }, .radius = 0.5f } );
-        spheres.push_back( { .center = {-1.0f, 0.0f, -1.0f }, .radius = 0.4f } );
+        instances = thrust::raw_pointer_cast( std::data( w.instances ) );
+        instanceCount = ( u32 ) std::size( w.instances );
 
-        std::vector<material> materials;
-        materials.push_back( { .albedo = { 0.8f, 0.8f, 0.0f }, .type = material_type::LAMBERT } );
-        materials.push_back( { .albedo = { 0.1f, 0.2f, 0.5f }, .type = material_type::LAMBERT } );
-        materials.push_back( { .albedo = { 0.9f, 0.7f, 0.1f }, .fuzz = 0.666f, .type = material_type::METAL } );
-        materials.push_back( { .ior = 1.5f, .type = material_type::DIELECTRIC } );
-        materials.push_back( { .ior = 1.0f / 1.5f, .type = material_type::DIELECTRIC } );
+        globalTlasBuffer = thrust::raw_pointer_cast( std::data( w.globalTlasBuffer ) );
+        tlasNodeCount = ( u32 ) std::size( w.globalTlasBuffer );
 
-        assert( std::size( spheres ) == std::size( materials ) );
+        globalClasBuffer = thrust::raw_pointer_cast( std::data( w.globalClasBuffer ) );
+        clasNodeCount = ( u32 ) std::size( w.globalClasBuffer );
 
-        this->spheres = { std::cbegin( spheres ), std::cend( spheres ) };
-        this->materials = { std::cbegin( materials ), std::cend( materials ) };
-    }
+        meshletInfoBuffer = thrust::raw_pointer_cast( std::data( w.meshletInfoBuffer ) );
+        meshletCount = ( u32 ) std::size( w.meshletInfoBuffer );
 
-    inline worldref GetRef() const
-    {
-        assert( std::size( spheres ) == std::size( materials ) );
-        return {
-            .hittables = thrust::raw_pointer_cast( std::data( spheres ) ),
-            .materials = thrust::raw_pointer_cast( std::data( materials ) ),
-            .count = ( u32 ) std::size( spheres )
-        };
+        globalVertexPosBuffer = thrust::raw_pointer_cast( std::data( w.globalVertexPosBuffer ) );
+        globalPackedVertexBuffer = thrust::raw_pointer_cast( std::data( w.globalPackedVertexBuffer ) );
+        vertexCount = ( u32 ) std::size( w.globalVertexPosBuffer );
+
+        globalTriangleBuffer = thrust::raw_pointer_cast( std::data( w.globalTriangleBuffer ) );
+        triangleByteCount = ( u32 ) std::size( w.globalTriangleBuffer );
     }
 };
 
@@ -87,88 +158,213 @@ struct globals
 // NOTE: these must be properly alligned
 __constant__ globals globs;
 
-inline __device__ float3 Shade( const ray_t& r )
+__device__ inline float3 Shade( const ray_t& r )
 {
     float t = 0.5f * r.dir.y + 0.5f;
     float3 col = lerp( float3{ 1.0f, 1.0f, 1.0f }, float3{ 0.5f, 0.7f, 1.0f }, t );
     return col;
 };
 
-__global__ void RenderKernel( cudaSurfaceObject_t fbSurf, const worldref w, u32 frameIdx ) 
+constexpr u32 VGPR_STACK_SIZE = 48;
+
+__host__ __device__ float RayVsAABB( float3 aabbMin, float3 aabbMax, float3 rayOrigin, float3 rayInvDir )
+{
+    float3 tA3 = ( aabbMin - rayOrigin ) * rayInvDir;
+    float3 tB3 = ( aabbMax - rayOrigin ) * rayInvDir;
+
+    float3 tMin3 = fminf( tA3, tB3 );
+    float3 tMax3 = fmaxf( tA3, tB3 );
+
+    float tEnter = fmaxf( tMin3.x, fmaxf( tMin3.y, tMin3.z ) );
+    float tExit = fminf( tMax3.x, fminf( tMax3.y, tMax3.z ) );
+
+    return ( tExit >= tEnter ) ? tEnter : CUDART_INF_F;
+}
+
+__host__ __device__ hit_record RayVsCluster( 
+    float3 rayOrigin, 
+    float3 rayInvDir, 
+    const packed_trs& trs,
+    const rt_meshlet_info& clusterInfo, 
+    const float3* positions, 
+    const u8* triangleIndices 
+) {
+    for( u32 ti = 0; ti < clusterInfo.triangleCount; ti += 3 )
+    {
+        float3 v0 = positions[ clusterInfo.vertexOffset + triangleIndices[ clusterInfo.triangleOffset + ti + 0 ] ];
+        float3 v1 = positions[ clusterInfo.vertexOffset + triangleIndices[ clusterInfo.triangleOffset + ti + 1 ] ];
+        float3 v2 = positions[ clusterInfo.vertexOffset + triangleIndices[ clusterInfo.triangleOffset + ti + 2 ] ];
+    }
+
+    float3 tA3 = ( aabbMin - rayOrigin ) * rayInvDir;
+    float3 tB3 = ( aabbMax - rayOrigin ) * rayInvDir;
+
+    float3 tMin3 = fminf( tA3, tB3 );
+    float3 tMax3 = fmaxf( tA3, tB3 );
+
+    float tEnter = fmaxf( tMin3.x, fmaxf( tMin3.y, tMin3.z ) );
+    float tExit = fminf( tMax3.x, fminf( tMax3.y, tMax3.z ) );
+
+    return ( tExit >= tEnter ) ? tEnter : CUDART_INF_F;
+}
+constexpr u32 CLUSTER_PAYLOAD_FLAG_BITS = 0x80000000u;
+
+struct hit_t
+{
+    float hitDist;
+    u32 primitiveIdx;
+};
+
+__device__ __forceinline bool IsMiss( const hit_t& hit )
+{
+    return hit.hitDist == CUDART_INF_F;
+}
+
+struct aabb_t
+{
+    float3 min;
+    float3 max;
+};
+
+struct tlas_policy
+{
+    const instance* instances;
+
+    __device__ __forceinline aabb_t GetAabb( u32 idx )
+    {
+        const instance& inst = instances[ idx ];
+        return { .min = inst.aabbMin, .max = inst.aabbMax };
+    }
+};
+
+// NOTE: this needs to offset by the root idx !
+struct clas_policy
+{
+    const rt_meshlet_info* clusters;
+
+    __device__ __forceinline aabb_t GetAabb( u32 idx )
+    {
+        const rt_meshlet_info& mlet = clusters[ idx ];
+        return { .min = mlet.aabbMin, .max = mlet.aabbMax };
+    }
+};
+
+template<typename TraversalPolicy>
+__device__ hit_t TraverseBVH( 
+    float3                rayOrigin, 
+    float3                rayInvDir, 
+    const gpu_bvh2_node*  bvh, 
+    TraversalPolicy       traversalPolicy
+) {
+    // NOTE: assume bvh is never empty !
+    u32 vgprStack[ VGPR_STACK_SIZE ] = {};
+    vgprStack[ 0 ] = 0;
+    
+    float hitDist = CUDART_INF_F;
+    u32 primitiveIdx = u32( -1 );
+
+    for( u32 stackCount = 1; stackCount > 0; --stackCount )
+    {
+        u32 nodePtr = vgprStack[ stackCount - 1 ];
+        const gpu_bvh2_node& node = bvh[ nodePtr ];
+        
+        u32 childIdx0 = node.childIdx[ 0 ];
+        if( Bvh2IsLeaf( childIdx0 ) )
+        {
+            u32 leafIdx = Bvh2LeafBase( childIdx0 );
+            auto[ aabbMin, aabbMax ] = traversalPolicy.GetAabb( leafIdx );
+
+            float instDist = RayVsAABB( aabbMin, aabbMax, rayOrigin, rayInvDir );
+
+            bool closerHit = hitDist > instDist;
+ 
+            primitiveIdx = closerHit ? leafIdx : primitiveIdx;
+            hitDist = fminf( hitDist, instDist );
+            
+            continue;
+        }
+        
+        childIdx0 = Bvh2NodeIdx( childIdx0 );
+        u32 childIdx1 = Bvh2NodeIdx( node.childIdx[ 1 ] );
+
+        float tChildDist0 = RayVsAABB( node.min[ 0 ], node.max[ 0 ], rayOrigin, rayInvDir );
+        float tChildDist1 = RayVsAABB( node.min[ 1 ], node.max[ 1 ], rayOrigin, rayInvDir );
+
+        bool swapChildren = tChildDist0 > tChildDist1;
+
+        u32 nearChildIdx = swapChildren ? childIdx1 : childIdx0;
+        u32 farChildIdx  = swapChildren ? childIdx0 : childIdx1;
+        float nearT = swapChildren ? tChildDist1 : tChildDist0;
+        float farT  = swapChildren ? tChildDist0 : tChildDist1;
+
+        vgprStack[ stackCount ] = farChildIdx;
+        stackCount += ( u32 ) ( farT < hitDist );
+        vgprStack[ stackCount ] = nearChildIdx;
+        stackCount += ( u32 ) ( nearT < hitDist );
+    }
+
+    return { .hitDist = hitDist, .primitiveIdx = primitiveIdx };
+}
+
+// NOTE: don't pass as a ref unless it's a gpu ref !
+__global__ void KernelPrimaryVisibility( cudaSurfaceObject_t fbSurf, const world_ref worldRef, u32 frameIdx ) 
 {
     u32 xi = threadIdx.x + blockIdx.x * blockDim.x;
     u32 yi = threadIdx.y + blockIdx.y * blockDim.y;
 
     if( ( xi >= globs.width ) || ( yi >= globs.height ) ) return;
 
-    const camera mainCam = globs.mainCam;
+    const camera& mainCam = globs.mainCam;
+    const instance* instances = worldRef.instances;
+    const rt_meshlet_info* meshlets = worldRef.meshletInfoBuffer;
 
     u32 pixelIdx = yi * globs.width + xi;
     u32 baseSeed = pixelIdx ^ ( frameIdx * PRIME1 );
 
-    float3 accColor = {};
-    for( u32 si = 0; si < globs.samplesPerPixel; ++si )
+    float2 jitter = RandUnitFloat2( 0, baseSeed ) - float2{ 0.5f, 0.5f };
+    float4 clipSpacePos = GetClipSpaceVector( float2( xi, yi ) + jitter, float2( globs.width, globs.height ) );
+    float4 worldHmgPos = mul( mainCam.invVP, clipSpacePos );
+    float3 worldPos = xyz( worldHmgPos ) / worldHmgPos.w;
+    float3 rayDir = normalize( worldPos - mainCam.pos );
+
+    float3 rayOrigin = mainCam.pos;
+    float3 invRayDir = 1.0f / rayDir;
+
+    hit_t instanceHit = TraverseBVH( rayOrigin, invRayDir, worldRef.globalTlasBuffer, tlas_policy{ instances } );
+
+    bool isMiss = IsMiss( instanceHit );
+    if( isMiss )
     {
-        float2 jitter = RandUnitFloat2( si, baseSeed ) - float2{ 0.5f, 0.5f };
-        float4 clipSpacePos = GetClipSpaceVector( float2( xi, yi ) + jitter, float2( globs.width, globs.height ) );
-        float4 worldHmgPos = mul( mainCam.invVP, clipSpacePos );
-        float3 worldPos = xyz( worldHmgPos ) / worldHmgPos.w;
-        float3 rayDir = normalize( worldPos - mainCam.pos );
-
-        ray_t currentRay = { .origin = mainCam.pos, .dir = rayDir };
-
-        float3 energyFactor = make_float3( 1.0f );
-        u32 pathSeed = baseSeed ^ ( si * PRIME3 );
-        for( u32 bi = 0; bi < globs.maxBounces; ++bi )
-        {
-            // NOTE: Russian Roulette
-            if( bi > 3 )
-            {
-                float survivalChance = max( energyFactor.x, max( energyFactor.y, energyFactor.z ) );
-                float shootChance = RandUnitFloat( bi, pathSeed );
-                if( shootChance > survivalChance ) break;
-                energyFactor /= survivalChance; // NOTE: Energy conservation boost
-            }
-
-            u32 primitiveIdx = 0;
-            hit_record rec = INVALID_HIT;
-            float closestSoFar = CUDART_INF_F;
-            for( u32 hi = 0; hi < w.count; ++hi )
-            {
-                sphere_t hittable = w.hittables[ hi ];
-                hit_record hit = HitRayVsSphere( currentRay, hittable, RAY_EPSILON, closestSoFar );
-                if( NO_HIT != hit.t )
-                {
-                    closestSoFar = hit.t;
-                    rec = hit;
-                    primitiveIdx = hi;
-                }
-            }
-
-            if( IsValidHit( rec ) )
-            {
-                const material& mat = w.materials[ primitiveIdx ];
-
-                auto[ scatterDir, attenuation ] = Scatter( mat, currentRay.dir, rec.worldNormal, bi, pathSeed );
-
-                currentRay = { .origin = rec.point, .dir = scatterDir };
-                energyFactor *= attenuation;
-            }
-            else
-            {
-                accColor += Shade( currentRay ) * energyFactor;
-                break;
-            }
-        }   
+        surf2Dwrite( CUDART_INF_F, fbSurf, xi * sizeof( float ), yi );
+        return;
     }
 
-    float3 linearCol = accColor / ( float ) globs.samplesPerPixel;
-    float3 srgbCol = LinearToSrgb( linearCol );
-    // NOTE: to avoid artifacts
-    float3 pixelCol = saturatef3( srgbCol ) * 255.99f;
-    u8x4 pixel = { ( u8 ) pixelCol.x, ( u8 ) pixelCol.y, ( u8 ) pixelCol.z, 255 };
+    const instance thisInst = instances[ instanceHit.primitiveIdx ];
+    bool isCluster = Bvh2RefIsInvalid( thisInst.clasBvhRoot );
+
+    u32 clusterIdx = thisInst.baseMeshletOffset;
+
+    if( !isCluster )
+    {
+        hit_t clusterHit = TraverseBVH( rayOrigin, invRayDir, thisInst.clasBvhRoot, clas_policy{ meshlets } );
+        bool isMiss = IsMiss( clusterHit );
+        if( isMiss )
+        {
+            surf2Dwrite( CUDART_INF_F, fbSurf, xi * sizeof( float ), yi );
+            return;
+        }
+        clusterIdx = clusterHit.primitiveIdx;
+    }
+
+    const rt_meshlet_info& cluster = meshlets[ clusterIdx ];
+
+    hit_record hit = RayVsCluster( 
+        rayOrigin, invRayDir, thisInst.toWorld, cluster, worldRef.globalVertexPosBuffer, worldRef.globalTriangleBuffer );
+
+    float viewDepth = hit.t * dot( mainCam.fwd, rayDir );
+   
     // NOTE: cuda 12.9 with err with interleaved source in ptx for this line ! on Pascal
-    surf2Dwrite( pixel, fbSurf, xi * sizeof( pixel ), yi );
+    surf2Dwrite( viewDepth, fbSurf, xi * sizeof( viewDepth ), yi );
 }
 
 __global__ void GradientSurfaceKernel( cudaSurfaceObject_t fbSurf, u16 width, u16 height ) 
@@ -230,9 +426,6 @@ struct cuda_context
     }
 };
 
-
-#include <chrono>
-
 struct frame_timer 
 {
     using steady_clk_t = std::chrono::steady_clock;
@@ -256,17 +449,44 @@ inline auto ToMiliseconds( std::chrono::microseconds duration )
 // NOTE: DBG flag used to trigger between the surface "in-place" vs dedicated + copy impls !
 constexpr bool DBG_INPLACE_WORK = false;
 
+// TODO: this is already duplicated in HellPack
+inline auto ReadFileBinary( const char* path )
+{
+    FILE* f = nullptr;
+    HP_ASSERT( ::fopen_s( &f, path, "rb" ) == 0 );
+    HP_ASSERT( f );
+
+    HP_ASSERT( ::fseek( f, 0, SEEK_END ) == 0 );
+    i32 sz = ::ftell( f );
+    HP_ASSERT( sz >= 0 );
+    HP_ASSERT( ::fseek( f, 0, SEEK_SET ) == 0 );
+
+    std::vector<u8> out( sz );
+    u64 read = ::fread( std::data( out ), 1, std::size( out ), f );
+    HP_ASSERT( std::size( out ) == read );
+
+    HP_ASSERT( ::fclose( f ) == 0 );
+    return out;
+}
+
 int main()
 {
     using pixel_t = uchar4;
 
     std::ios::sync_with_stdio( false );
 
+    std::vector<u8> hlpBinaryData = ReadFileBinary( "D:/3d models/nightclub_futuristic_pub_ambience_asset.hllp" );
+    hellpack_view hellpackView = { hlpBinaryData };
+
+    world_data gpuWorldData;
+    gpuWorldData.UploadAssetFileData( hellpackView );
+
     // NOTE: init sub-systems
-    auto pCu = std::make_unique<cuda_context>();
     auto pPlatform = std::make_unique<sdl_platform>( width, height, WINDOW_TITLE );
 
     auto[ widthInPixels, heightInPixels ] = pPlatform->GetWindowSizeInPixels();
+
+    auto pCu = std::make_unique<cuda_context>();
     auto pDx11 = std::make_unique<dx11_context>( 
         ( HWND ) pPlatform->GetWin32WindowHandle(), pCu->luid, widthInPixels, heightInPixels );
 
@@ -291,13 +511,14 @@ int main()
         std::chrono::microseconds frameTime = {};
         {
             frame_timer frameTimer = { frameTime };
-            for( SDL_Event e; SDL_PollEvent( &e );)
+            for( SDL_Event e; SDL_PollEvent( &e ); )
             {
                 quit = ( SDL_EVENT_QUIT == e.type ) || ( SDL_EVENT_TERMINATING == e.type );
                 if( quit ) break;
             }
 
-            auto RenderLoop = [&] ( cudaSurfaceObject_t fbSurf ) {
+            auto RenderLoop = [ & ]( cudaSurfaceObject_t fbSurf ) 
+            {
                 GradientSurfaceKernel<<<blocks, dim3( tx, ty ), 0, pCu->mainStream>>>( fbSurf, width, height );
                 CUDA_CHECK( cudaGetLastError() );
             };
@@ -307,7 +528,7 @@ int main()
                 RenderLoop( pGradTex->surf );
                 //CUDA_CHECK( cudaStreamSynchronize( pCu->mainStream ) );
             }
-            // NOTE: interop copy stuff
+            // NOTE: interop stuff
             {
                 auto scopedMtx = pInteropTex->GetScopedMutex<CUDA_ACQUIRE>();
                 auto mappedTex = pInteropTex->GetMapped<DBG_INPLACE_WORK>( pCu->mainStream );
@@ -322,7 +543,6 @@ int main()
                     CudaCopyTextureDeviceSync( pGradTex->array, mappedTex.mem, widthInBytes, pGradTex->height );
                     CUDA_CHECK( cudaGetLastError() );
                 }
-
             }
 
             auto scopedMtx = pInteropTex->GetScopedMutex<DX11_ACQUIRE>();
@@ -348,9 +568,6 @@ int main()
     //worldref worldView = pWorld->GetRef();
     //
     //
-    //RenderKernel<<<blocks, dim3( tx, ty )>>>( pGradTex->surf, worldView, frameIdx );
-    //CUDA_CHECK( cudaGetLastError() );
-    //CUDA_CHECK( cudaDeviceSynchronize() );
     //
     //auto hostTex = CudaCopyImageToHostSync( *pGradTex );
     //stbi_write_png( "sky.png", width, height, 4, std::data( hostTex ), width * sizeof( pixel_t ) );

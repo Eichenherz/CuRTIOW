@@ -1,3 +1,6 @@
 [submodule "3rdParty/stb"]
 	path = 3rdParty/stb
 	url = https://github.com/nothings/stb.git
+[submodule "3rdParty/HellPack"]
+	path = 3rdParty/HellPack
+	url = https://github.com/Eichenherz/HellPack.git
